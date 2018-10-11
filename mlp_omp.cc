@@ -260,6 +260,8 @@ void update_weight_allgather(
   int sid = get_socket_num();
   int tid = nthreads_per_socket * sid + tid_in_socket;
 
+  double t_allgather_begin = dsecnd();
+
 #if defined(USE_RING_ALL_REDUCE)
   int ld = weight_grad->ld();
   size_t weight_size = nrows * ld;
@@ -290,8 +292,6 @@ void update_weight_allgather(
 
   size_t socket_begin = sid * weight_size;
   size_t next_socket_begin = next_sid * weight_size;
-
-  double t_allgather_begin = dsecnd();
 
   if (nsockets == 1) {
     int chunk_to_push = 0;
