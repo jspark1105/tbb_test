@@ -8,6 +8,7 @@
 #include <thread>
 
 #include <mkl.h>
+#include <omp.h>
 #include <numa.h>
 #include <x86intrin.h>
 // #include <glog/logging.h>
@@ -34,6 +35,7 @@ constexpr int PAD = 16;
 constexpr int CACHE_LINE_LEN = 16;
 
 int nthreads_per_socket;
+int nthreads;
 
 class pinning_observer : public tbb::task_scheduler_observer {
  public:
@@ -152,7 +154,6 @@ class FullyConnectedForward {
       0,
       nthreads_per_socket,
       [&](size_t task_id) {
-        int tid = numa_node_id_ * nthreads_per_socket + task_id;
         int m_begin, m_end, n_begin, n_end;
         get_2dpartition(
             &m_begin,
@@ -184,16 +185,20 @@ class FullyConnectedForward {
             output_->ld());
 
         if (iteration_ >= NWARMUP) {
+          int tid =
+              numa_node_id_ * nthreads_per_socket +
+              tbb::task_arena::current_thread_index();
+
           double dt = dsecnd() - t0;
           double flops = 2. * m * n * k;
 #ifdef PRINT_PER_LAYER_PERFORMANCE
           // if (tid == 0) {
             double gflops = flops / dt / 1e9;
-            // LOG(INFO) << "fwd layer " << l << " tid " << tid << " tid "
-            //      << this_thread::get_id() << " " << m_end - m_begin
-            //      << " x " << n_end - n_begin << " x " << k << " "
-            //      << dt * 1e3 << " ms " << gflops << " GF/s "
-            //      << gflops / nthreads << " GF/s/core";
+            cerr << "fwd layer " << layer_id_ << " tid " << tid << " tid "
+                 << this_thread::get_id() << " " << m_end - m_begin
+                 << " x " << n_end - n_begin << " x " << k << " "
+                 << dt * 1e3 << " ms " << gflops << " GF/s "
+                 << nthreads << " GF/s/core" << endl;
           // }
 #endif
           sum_times[tid][layer_id_][FWD] += dt;
@@ -246,8 +251,8 @@ int main(int argc, char **argv)
 
   nsockets = atoi(argv[1]);
   nthreads_per_socket = atoi(argv[2]);
-  int nthreads = nsockets * nthreads_per_socket;
-  // omp_set_num_threads(1);
+  nthreads = nsockets * nthreads_per_socket;
+  omp_set_num_threads(1);
 
   tbb::task_scheduler_init scheduler_init(nthreads);
   // tbb_affinity_partitioners.resize(nsockets);
@@ -323,40 +328,41 @@ int main(int argc, char **argv)
     dags[0].release_wait();
   });
 
-  vector<continue_node<continue_msg>> tbb_flow_nodes;
+  vector<unique_ptr<continue_node<continue_msg>>> tbb_flow_nodes;
   vector<unique_ptr<graph_node>> cross_graph_edges;
   for (int l = 0; l < nlayers; ++l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
       tbb_flow_nodes.emplace_back(
-        dags[numa_node_id],
-        FullyConnectedForward(
-          activations[l].get(), weights[l].get(), activations[l + 1].get(),
-          numa_node_id, l, 0));
+        new continue_node<continue_msg>(
+          dags[numa_node_id],
+          FullyConnectedForward(
+            activations[l].get(), weights[l].get(), activations[l + 1].get(),
+            numa_node_id, l, 0)));
       if (l == 0) {
         if (numa_node_id == 0) {
-          make_edge(dag_root, tbb_flow_nodes.back());
+          make_edge(dag_root, *tbb_flow_nodes.back());
         } else {
           cross_graph_edges.push_back(make_crossgraph_edge(
-              dag_root, tbb_flow_nodes.back(), dags[numa_node_id]));
+              dag_root, *tbb_flow_nodes.back(), dags[numa_node_id]));
         }
       } else {
         make_edge(
-            tbb_flow_nodes[(l - 1) * nsockets + numa_node_id],
-            tbb_flow_nodes.back());
+            *tbb_flow_nodes[(l - 1) * nsockets + numa_node_id],
+            *tbb_flow_nodes.back());
       }
 
       if (l == nlayers - 1) {
         if (numa_node_id == 0) {
-          make_edge(tbb_flow_nodes.back(), dag_exit);
+          make_edge(*tbb_flow_nodes.back(), dag_exit);
         } else {
           cross_graph_edges.push_back(
-              make_crossgraph_edge(tbb_flow_nodes.back(), dag_exit, dags[0]));
+              make_crossgraph_edge(*tbb_flow_nodes.back(), dag_exit, dags[0]));
         }
       }
     } // for each socket
   } // for each layer
 
-  bool use_flow_graph = false;
+  bool use_flow_graph = true;
   for (int it = 0; it < NWARMUP + NITER; ++it) {
     if (use_flow_graph) {
       tbb_arena[0]->execute([&dag_root] { dag_root.try_put(continue_msg()); });

@@ -23,7 +23,7 @@ CXX ?= g++
 CC = ${CXX} -std=c++11 
 #CC = /usr/local/opt/gcc/bin/g++-7 -std=c++11
 
-LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_core -lmkl_gnu_thread -lpthread -lm -ldl ${NUMAROOT}/lib/libnuma.a -L${TBBROOT}/lib -ltbb
+LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_core -lmkl_gnu_thread -lpthread -lm -ldl ${NUMAROOT}/lib/libnuma.a ${TBBROOT}/lib/libtbb.a
 
 mlp_omp: mlp_omp.o Partition.o Rand.o TwistedHyperCube.o
 	$(CC) -o $(OPT) $(CFLAGS) -o $@ $^ $(LDFLAGS)
