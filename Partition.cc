@@ -6,7 +6,6 @@
 int nsockets;
 
 int get_num_threads_per_socket() {
-  // std::cerr << "1" << std::endl;
   int nthreads =
     omp_in_parallel() ? omp_get_num_threads() : omp_get_max_threads();
   assert(nthreads % nsockets == 0);
@@ -14,13 +13,11 @@ int get_num_threads_per_socket() {
 }
 
 int get_socket_num() {
-  // std::cerr << "2" << std::endl;
   int tid = omp_get_thread_num();
   return tid / get_num_threads_per_socket();
 }
 
 int get_thread_num_in_socket() {
-  // std::cerr << "3" << std::endl;
   int tid = omp_get_thread_num();
   return tid % get_num_threads_per_socket();
 }

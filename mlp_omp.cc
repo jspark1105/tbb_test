@@ -461,7 +461,7 @@ int main(int argc, char **argv)
 
   unique_ptr<Matrix<float, PAD>>
     weights[nlayers], weight_grads[nlayers], weight_grad_push_bufs[nlayers][3],
-    activations[nlayers + 2];
+    activations[nlayers + 1];
 
   /////////////////////////////////////////////////////////////////////////////
   // allocate memory and "first-touch" for NUMA-aware allocation
@@ -486,9 +486,6 @@ int main(int argc, char **argv)
   }
   activations[nlayers].reset(
     create_matrix_with_numa_aware_allocation(batch_size, nfeatures[nlayers]));
-  // this extra is to avoid overwriting the input
-  activations[nlayers + 1].reset(
-    create_matrix_with_numa_aware_allocation(batch_size, nfeatures[0]));
 
   /////////////////////////////////////////////////////////////////////////////
   // check correctness of all-reduce
