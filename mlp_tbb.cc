@@ -8,8 +8,8 @@
 #include <thread>
 
 #include <mkl.h>
-#include <omp.h>
 #include <numa.h>
+#include <omp.h>
 #include <x86intrin.h>
 // #include <glog/logging.h>
 
@@ -20,8 +20,8 @@
 #include <tbb/task_arena.h>
 #include <tbb/task_group.h>
 #define TBB_PREVIEW_LOCAL_OBSERVER 1
-#include <tbb/task_scheduler_observer.h>
 #include <tbb/task_scheduler_init.h>
+#include <tbb/task_scheduler_observer.h>
 
 #include "Matrix.h"
 #include "Partition.h"
@@ -62,7 +62,7 @@ class pinning_observer : public tbb::task_scheduler_observer {
     } else {
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
-      for (int i = 0; i < std::thread::hardware_concurrency(); ++i) {
+      for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) {
         CPU_SET(i, &cpuset);
       }
       pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
@@ -77,10 +77,10 @@ vector<unique_ptr<tbb::task_arena>> tbb_arena;
 vector<unique_ptr<pinning_observer>> tbb_observers;
 vector<unique_ptr<tbb::affinity_partitioner>> tbb_affinity_partitioners;
 
-Matrix<float, PAD> *
-  create_matrix_with_numa_aware_allocation(int nrows, int ncols)
-{
-  Matrix<float, PAD> *matrix = new Matrix<float, PAD>(nrows, ncols);
+Matrix<float, PAD>* create_matrix_with_numa_aware_allocation(
+    int nrows,
+    int ncols) {
+  Matrix<float, PAD>* matrix = new Matrix<float, PAD>(nrows, ncols);
 
   for (int sid = 0; sid < nsockets; ++sid) {
     tbb_arena[sid]->execute([&]() {
@@ -114,18 +114,17 @@ enum Breakdown {
 // for now.
 // To eliminate this constraint, we need pading after each socket's copy of
 // weight.
-int nfeatures[] = { 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1 };
-//int nfeatures[] = { 512, 512 };
-constexpr int nlayers = sizeof(nfeatures)/sizeof(nfeatures[0]) - 1;
+int nfeatures[] = {1024, 1024, 1024, 1024, 1024, 1024, 1024, 1};
+// int nfeatures[] = { 512, 512 };
+constexpr int nlayers = sizeof(nfeatures) / sizeof(nfeatures[0]) - 1;
 constexpr int MAX_NUM_THREADS = 1024;
 constexpr int NWARMUP = 2, NITER = 256;
 
 // Being careful not to have false sharing
 constexpr int NUM_BREAKDOWNS_ROUNDED_UP =
-  (NUM_BREAKDOWNS + CACHE_LINE_LEN - 1) / CACHE_LINE_LEN * CACHE_LINE_LEN;
-double
-  sum_times[MAX_NUM_THREADS][nlayers][NUM_BREAKDOWNS_ROUNDED_UP] = { 0 },
-  sum_flops[nlayers][NUM_BREAKDOWNS] = { 0 };
+    (NUM_BREAKDOWNS + CACHE_LINE_LEN - 1) / CACHE_LINE_LEN * CACHE_LINE_LEN;
+double sum_times[MAX_NUM_THREADS][nlayers][NUM_BREAKDOWNS_ROUNDED_UP] = {0},
+       sum_flops[nlayers][NUM_BREAKDOWNS] = {0};
 
 class FullyConnectedForward {
  public:
@@ -152,63 +151,61 @@ class FullyConnectedForward {
     float aspect_ratio = 4.;
 
     tbb::parallel_for(
-      0,
-      nthreads_per_socket,
-      [&](size_t task_id) {
-        int m_begin, m_end, n_begin, n_end;
-        get_2dpartition(
-            &m_begin,
-            &m_end,
-            &n_begin,
-            &n_end,
-            m,
-            n,
-            aspect_ratio,
-            false /* m_align */,
-            numa_node_id_,
-            nthreads_per_socket,
-            task_id);
+        0,
+        nthreads_per_socket,
+        [&](size_t task_id) {
+          int m_begin, m_end, n_begin, n_end;
+          get_2dpartition(
+              &m_begin,
+              &m_end,
+              &n_begin,
+              &n_end,
+              m,
+              n,
+              aspect_ratio,
+              false /* m_align */,
+              numa_node_id_,
+              nthreads_per_socket,
+              task_id);
 
-        cblas_sgemm(
-            CblasRowMajor,
-            CblasNoTrans,
-            CblasTrans,
-            m_end - m_begin,
-            n_end - n_begin,
-            k,
-            1.0f,
-            input_->rawData(m_begin, 0),
-            input_->ld(),
-            weight_->rawData(numa_node_id_ * n + n_begin, 0),
-            weight_->ld(),
-            0.0f,
-            output_->rawData(m_begin, n_begin),
-            output_->ld());
+          cblas_sgemm(
+              CblasRowMajor,
+              CblasNoTrans,
+              CblasTrans,
+              m_end - m_begin,
+              n_end - n_begin,
+              k,
+              1.0f,
+              input_->rawData(m_begin, 0),
+              input_->ld(),
+              weight_->rawData(numa_node_id_ * n + n_begin, 0),
+              weight_->ld(),
+              0.0f,
+              output_->rawData(m_begin, n_begin),
+              output_->ld());
 
-        if (iteration_ >= NWARMUP) {
-          int tid =
-              numa_node_id_ * nthreads_per_socket +
-              tbb::task_arena::current_thread_index();
+          if (iteration_ >= NWARMUP) {
+            int tid = numa_node_id_ * nthreads_per_socket +
+                tbb::task_arena::current_thread_index();
 
-          double dt = dsecnd() - t0;
-          double flops = 2. * m * n * k;
+            double dt = dsecnd() - t0;
+            double flops = 2. * m * n * k;
 #ifdef PRINT_PER_LAYER_PERFORMANCE
-          // if (tid == 0) {
+            // if (tid == 0) {
             double gflops = flops / dt / 1e9;
             cerr << "fwd layer " << layer_id_ << " tid " << tid << " tid "
-                 << this_thread::get_id() << " " << m_end - m_begin
-                 << " x " << n_end - n_begin << " x " << k << " "
-                 << dt * 1e3 << " ms " << gflops << " GF/s "
-                 << nthreads << " GF/s/core" << endl;
-          // }
+                 << this_thread::get_id() << " " << m_end - m_begin << " x "
+                 << n_end - n_begin << " x " << k << " " << dt * 1e3 << " ms "
+                 << gflops << " GF/s " << nthreads << " GF/s/core" << endl;
+        // }
 #endif
-          sum_times[tid][layer_id_][FWD] += dt;
-          if (tid == 0) {
-            sum_flops[layer_id_][FWD] += flops;
+            sum_times[tid][layer_id_][FWD] += dt;
+            if (tid == 0) {
+              sum_flops[layer_id_][FWD] += flops;
+            }
           }
-        }
-      },
-      tbb::simple_partitioner());
+        },
+        tbb::simple_partitioner());
 
     ++iteration_;
   }
@@ -218,7 +215,7 @@ class FullyConnectedForward {
   }
 
  private:
-  Matrix<float, PAD> *input_, *weight_, *output_;
+  Matrix<float, PAD>*input_, *weight_, *output_;
   int numa_node_id_, layer_id_;
   mutable int iteration_;
 };
@@ -253,7 +250,8 @@ class FullyConnectedBackward {
         0,
         nthreads_per_socket,
         [&](size_t task_id) {
-          int tid = numa_node_id_ * nthreads_per_socket + tbb::task_arena::current_thread_index();
+          int tid = numa_node_id_ * nthreads_per_socket +
+              tbb::task_arena::current_thread_index();
           int m_begin, m_end, n_begin, n_end;
 
           // partition k over socket
@@ -264,10 +262,7 @@ class FullyConnectedBackward {
           // 2d partition m and n within socket
           // weight_grad gemm performs well with aspect ratio
           // 8 * (m_end - m_begin) ~= (n_end - n_begin)
-          float aspect_ratio = 1./2;
-          /*if (m == 512 && n == 1280) {
-            aspect_ratio = 2.;
-          }*/
+          float aspect_ratio = 1. / 2;
           get_intra_socket_2dpartition(
               &m_begin,
               &m_end,
@@ -321,8 +316,11 @@ class FullyConnectedBackward {
             if (tid == 0) {
               double gflops = flops / dt / 1e9;
               printf(
-                "wgt_gradient layer %d %g ms %g GF/s %g GF/s/core\n",
-                layer_id_, dt * 1e3, gflops, gflops / nthreads);
+                  "wgt_gradient layer %d %g ms %g GF/s %g GF/s/core\n",
+                  layer_id_,
+                  dt * 1e3,
+                  gflops,
+                  gflops / nthreads);
             }
 #endif
             sum_times[tid][layer_id_][WGT_GRAD] += dt;
@@ -341,17 +339,12 @@ class FullyConnectedBackward {
         0,
         nthreads_per_socket,
         [&](size_t task_id) {
-          int tid = numa_node_id_ * nthreads_per_socket + tbb::task_arena::current_thread_index();
+          int tid = numa_node_id_ * nthreads_per_socket +
+              tbb::task_arena::current_thread_index();
           int m_begin, m_end, n_begin, n_end;
           // backward gemm performs well with aspect ratio
           // (m_end - m_begin) ~= 32 * (n_end - n_begin)
-          float aspect_ratio = 1./2;
-          /*if (n == 512 && k == 512) {
-            aspect_ratio = 4.;
-          }
-          else if (n == 1280 && k == 512) {
-            aspect_ratio = 16.;
-          }*/
+          float aspect_ratio = 1. / 2;
           get_2dpartition(
               &m_begin,
               &m_end,
@@ -365,8 +358,7 @@ class FullyConnectedBackward {
               nthreads_per_socket,
               task_id);
           if (0 == iteration_ && 0 == tid) {
-            int mb =
-                (m / nsockets + m_end - m_begin - 1) / (m_end - m_begin);
+            int mb = (m / nsockets + m_end - m_begin - 1) / (m_end - m_begin);
             int nb = (n + n_end - n_begin - 1) / (n_end - n_begin);
             printf(
                 "bwd m %d n %d k %d bm %d bn %d bk %d mb %d nb %d kb %d\n",
@@ -382,7 +374,7 @@ class FullyConnectedBackward {
             printf("numa_node = %d\n", numa_node_of_cpu(sched_getcpu()));
           }
 
-          const float *A_begin = output_grad_->rawData(m_begin, 0);
+          const float* A_begin = output_grad_->rawData(m_begin, 0);
           cblas_sgemm(
               CblasRowMajor,
               CblasNoTrans,
@@ -406,8 +398,11 @@ class FullyConnectedBackward {
             if (tid == 0) {
               double gflops = flops / dt / 1e9;
               printf(
-                "bwd layer %d %g ms %g GF/s %g GF/s/core\n",
-                layer_id_, dt * 1e3, gflops, gflops / nthreads);
+                  "bwd layer %d %g ms %g GF/s %g GF/s/core\n",
+                  layer_id_,
+                  dt * 1e3,
+                  gflops,
+                  gflops / nthreads);
             }
 #endif
             sum_times[tid][layer_id_][BWD] += dt;
@@ -426,11 +421,11 @@ class FullyConnectedBackward {
   }
 
  private:
-  Matrix<float, PAD> *input_, *input_grad_, *weight_, *output_grad_, *weight_grad_;
+  Matrix<float, PAD>*input_, *output_grad_, *weight_, *input_grad_,
+      *weight_grad_;
   int numa_node_id_, layer_id_;
   mutable int iteration_;
 };
-
 
 // Create a thin async_node at each cross-graph edge.
 // It prevents task bypassing which would violate affinity.
@@ -452,8 +447,7 @@ std::unique_ptr<flow::graph_node> make_crossgraph_edge(
   return std::unique_ptr<flow::graph_node>(a);
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char** argv) {
   if (argc != 3) {
     fprintf(stderr, "%s <nsockets> <nthreads_per_socket>\n", argv[0]);
     exit(1);
@@ -474,30 +468,27 @@ int main(int argc, char **argv)
 
   int batch_size = 1024 * nsockets; // weak-scaling with nsockets
 
-  unique_ptr<Matrix<float, PAD>>
-    weights[nlayers], weight_grads[nlayers],
-    activations[nlayers + 2];
+  unique_ptr<Matrix<float, PAD>> weights[nlayers], weight_grads[nlayers],
+      activations[nlayers + 2];
 
   /////////////////////////////////////////////////////////////////////////////
   // allocate memory and "first-touch" for NUMA-aware allocation
   for (int l = 0; l < nlayers; ++l) {
     activations[l].reset(
-      create_matrix_with_numa_aware_allocation(batch_size, nfeatures[l]));
+        create_matrix_with_numa_aware_allocation(batch_size, nfeatures[l]));
 
     // Weights and their gradients are replicated at each socket.
-    weights[l].reset(
-      create_matrix_with_numa_aware_allocation(
+    weights[l].reset(create_matrix_with_numa_aware_allocation(
         nsockets * nfeatures[l + 1], nfeatures[l]));
 
-    weight_grads[l].reset(
-      create_matrix_with_numa_aware_allocation(
+    weight_grads[l].reset(create_matrix_with_numa_aware_allocation(
         nsockets * nfeatures[l + 1], nfeatures[l]));
   }
   activations[nlayers].reset(
-    create_matrix_with_numa_aware_allocation(batch_size, nfeatures[nlayers]));
+      create_matrix_with_numa_aware_allocation(batch_size, nfeatures[nlayers]));
   // this extra is to avoid overwriting the input
   activations[nlayers + 1].reset(
-    create_matrix_with_numa_aware_allocation(batch_size, nfeatures[0]));
+      create_matrix_with_numa_aware_allocation(batch_size, nfeatures[0]));
 
   /////////////////////////////////////////////////////////////////////////////
   // initialize values (only done by the master thread to be deterministic)
@@ -513,9 +504,9 @@ int main(int argc, char **argv)
 
     for (int s = 1; s < nsockets; ++s) {
       memcpy(
-        weights[l]->rawData(s * nfeatures[l + 1], 0),
-        weights[l]->rawData(),
-        nfeatures[l + 1] * weights[l]->ld() * sizeof(float));
+          weights[l]->rawData(s * nfeatures[l + 1], 0),
+          weights[l]->rawData(),
+          nfeatures[l + 1] * weights[l]->ld() * sizeof(float));
     }
   }
 
@@ -531,24 +522,25 @@ int main(int argc, char **argv)
 
   using namespace tbb::flow;
 
-  continue_node<continue_msg> dag_root(dags[0], [&dags](continue_msg) {
-    dags[0].reserve_wait();
-  });
-  continue_node<continue_msg> dag_exit(dags[0], [&dags](continue_msg) {
-    dags[0].release_wait();
-  });
+  continue_node<continue_msg> dag_root(
+      dags[0], [&dags](continue_msg) { dags[0].reserve_wait(); });
+  continue_node<continue_msg> dag_exit(
+      dags[0], [&dags](continue_msg) { dags[0].release_wait(); });
 
   vector<unique_ptr<continue_node<continue_msg, lightweight>>> tbb_flow_nodes;
   vector<unique_ptr<graph_node>> cross_graph_edges;
   // forward
   for (int l = 0; l < nlayers; ++l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
-      tbb_flow_nodes.emplace_back(
-        new continue_node<continue_msg, lightweight>(
+      tbb_flow_nodes.emplace_back(new continue_node<continue_msg, lightweight>(
           dags[numa_node_id],
           FullyConnectedForward(
-            activations[l].get(), weights[l].get(), activations[l + 1].get(),
-            numa_node_id, l, 0)));
+              activations[l].get(),
+              weights[l].get(),
+              activations[l + 1].get(),
+              numa_node_id,
+              l,
+              0)));
       if (l == 0) {
         if (numa_node_id == 0) {
           make_edge(dag_root, *tbb_flow_nodes.back());
@@ -566,16 +558,17 @@ int main(int argc, char **argv)
   // backward
   for (int l = nlayers - 1; l >= 0; --l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
-      tbb_flow_nodes.emplace_back(
-        new continue_node<continue_msg, lightweight>(
+      tbb_flow_nodes.emplace_back(new continue_node<continue_msg, lightweight>(
           dags[numa_node_id],
           FullyConnectedBackward(
-            activations[l].get(), // input
-            activations[l + 1].get(), // output_grad
-            weights[l].get(),
-            activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
-            weight_grads[l].get(),
-            numa_node_id, l, 0)));
+              activations[l].get(), // input
+              activations[l + 1].get(), // output_grad
+              weights[l].get(),
+              activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
+              weight_grads[l].get(),
+              numa_node_id,
+              l,
+              0)));
 
       make_edge(
           *tbb_flow_nodes
@@ -603,48 +596,62 @@ int main(int argc, char **argv)
 
     // forward
     for (int l = 0; l < nlayers; ++l) {
-      double t0 = dsecnd();
-
       for (int sid = nsockets - 1; sid >= 1; --sid) {
-        tbb_arena[sid]->enqueue([&, sid, l, it]{ tg[sid].run(
-          FullyConnectedForward(
-            activations[l].get(), weights[l].get(), activations[l + 1].get(),
-            sid, l, it)); });
+        tbb_arena[sid]->enqueue([&, sid, l, it] {
+          tg[sid].run(FullyConnectedForward(
+              activations[l].get(),
+              weights[l].get(),
+              activations[l + 1].get(),
+              sid,
+              l,
+              it));
+        });
       } // sid
 
       int sid = 0;
-      tbb_arena[sid]->execute([&, sid, l, it]{ tg[sid].run(
-        FullyConnectedForward(
-          activations[l].get(), weights[l].get(), activations[l + 1].get(),
-          sid, l, it)); });
+      tbb_arena[sid]->execute([&, sid, l, it] {
+        tg[sid].run(FullyConnectedForward(
+            activations[l].get(),
+            weights[l].get(),
+            activations[l + 1].get(),
+            sid,
+            l,
+            it));
+      });
 
-      tbb_arena[0]->execute([&tg]{ tg[0].wait(); });
+      tbb_arena[0]->execute([&tg] { tg[0].wait(); });
     } // for each layer
 
     // backward
     for (int l = nlayers - 1; l >= 0; --l) {
       for (int sid = nsockets - 1; sid >= 1; --sid) {
-        tbb_arena[sid]->enqueue([&, sid, l, it]{ tg[sid].run(
-          FullyConnectedBackward(
-            activations[l].get(), // input
-            activations[l + 1].get(), // output_grad
-            weights[l].get(),
-            activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
-            weight_grads[l].get(),
-            sid, l, it)); });
+        tbb_arena[sid]->enqueue([&, sid, l, it] {
+          tg[sid].run(FullyConnectedBackward(
+              activations[l].get(), // input
+              activations[l + 1].get(), // output_grad
+              weights[l].get(),
+              activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
+              weight_grads[l].get(),
+              sid,
+              l,
+              it));
+        });
       } // sid
 
       int sid = 0;
-      tbb_arena[sid]->execute([&, sid, l, it]{ tg[sid].run(
-        FullyConnectedBackward(
+      tbb_arena[sid]->execute([&, sid, l, it] {
+        tg[sid].run(FullyConnectedBackward(
             activations[l].get(), // input
             activations[l + 1].get(), // output_grad
             weights[l].get(),
             activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
             weight_grads[l].get(),
-            sid, l, it)); });
+            sid,
+            l,
+            it));
+      });
 
-      tbb_arena[0]->execute([&tg]{ tg[0].wait(); });
+      tbb_arena[0]->execute([&tg] { tg[0].wait(); });
     } // for each layer
   } // for each iteration
 
@@ -658,9 +665,8 @@ int main(int argc, char **argv)
       double sum = 0, max = 0;
       if (i == WGT_GRAD || i == BWD) {
         for (int sid = 0; sid < nsockets; ++sid) {
-          for (int tid_in_socket = 0;
-              tid_in_socket < nthreads_per_socket;
-              ++tid_in_socket) {
+          for (int tid_in_socket = 0; tid_in_socket < nthreads_per_socket;
+               ++tid_in_socket) {
             int tid = sid * nthreads_per_socket + tid_in_socket;
             sum += sum_times[tid][l][i];
             max = std::max(max, sum_times[tid][l][i]);
@@ -670,12 +676,10 @@ int main(int argc, char **argv)
 
         double avg = sum / nthreads_per_socket / nsockets;
         load_imbalance[l][i] = max / avg;
-      }
-      else {
-        int nthreads_for_i = nthreads;
-          // i >= WGT_UPDATE
-          // ? nthreads_per_socket_for_allreduce[nthreads_per_socket] * nsockets
-          // : nthreads;
+      } else {
+        // i >= WGT_UPDATE
+        // ? nthreads_per_socket_for_allreduce[nthreads_per_socket] * nsockets
+        // : nthreads;
 
         for (int tid = 0; tid < nthreads; ++tid) {
           sum += sum_times[tid][l][i];
@@ -691,23 +695,22 @@ int main(int argc, char **argv)
 
   /////////////////////////////////////////////////////////////////////////////
   // report timing
-  double
-    total_times[NUM_BREAKDOWNS] = { 0 }, total_flops[NUM_BREAKDOWNS] = { 0 };
+  double total_times[NUM_BREAKDOWNS] = {0}, total_flops[NUM_BREAKDOWNS] = {0};
   for (int l = 0; l < nlayers; ++l) {
     printf(
-      "[layer %d] fwd %g ms/iter (%g GF/s/core) imbalance %g, "
-      "wgt_grad %g ms/iter (%g GF/s/core) imbalance %g, "
-      "bwd %g ms/iter (%g GF/s/core) imbalance %g\n",
-      l,
-      max_sum_times[l][FWD] / NITER * 1e3,
-      sum_flops[l][FWD] / max_sum_times[l][FWD] / nthreads / 1e9,
-      load_imbalance[l][FWD],
-      max_sum_times[l][WGT_GRAD] / NITER * 1e3,
-      sum_flops[l][WGT_GRAD] / max_sum_times[l][WGT_GRAD] / nthreads / 1e9,
-      load_imbalance[l][WGT_GRAD],
-      max_sum_times[l][BWD] / NITER * 1e3,
-      sum_flops[l][BWD] / max_sum_times[l][BWD] / nthreads / 1e9,
-      load_imbalance[l][BWD]);
+        "[layer %d] fwd %g ms/iter (%g GF/s/core) imbalance %g, "
+        "wgt_grad %g ms/iter (%g GF/s/core) imbalance %g, "
+        "bwd %g ms/iter (%g GF/s/core) imbalance %g\n",
+        l,
+        max_sum_times[l][FWD] / NITER * 1e3,
+        sum_flops[l][FWD] / max_sum_times[l][FWD] / nthreads / 1e9,
+        load_imbalance[l][FWD],
+        max_sum_times[l][WGT_GRAD] / NITER * 1e3,
+        sum_flops[l][WGT_GRAD] / max_sum_times[l][WGT_GRAD] / nthreads / 1e9,
+        load_imbalance[l][WGT_GRAD],
+        max_sum_times[l][BWD] / NITER * 1e3,
+        sum_flops[l][BWD] / max_sum_times[l][BWD] / nthreads / 1e9,
+        load_imbalance[l][BWD]);
 
     for (int i = FWD; i < NUM_BREAKDOWNS; ++i) {
       total_times[i] += max_sum_times[l][i];
@@ -716,15 +719,15 @@ int main(int argc, char **argv)
   } // for each layer
 
   printf(
-    "total fwd %g ms/iter (%g GF/s/core), "
-    "wgt_grad %g ms/iter (%g GF/s/core), "
-    "bwd %g ms/iter (%g GF/s/core)\n",
-    total_times[FWD] / NITER * 1e3,
-    total_flops[FWD] / total_times[FWD] / nthreads / 1e9,
-    total_times[WGT_GRAD] / NITER * 1e3,
-    total_flops[WGT_GRAD] / total_times[WGT_GRAD] / nthreads / 1e9,
-    total_times[BWD] / NITER * 1e3,
-    total_flops[BWD] / total_times[BWD] / nthreads / 1e9);
+      "total fwd %g ms/iter (%g GF/s/core), "
+      "wgt_grad %g ms/iter (%g GF/s/core), "
+      "bwd %g ms/iter (%g GF/s/core)\n",
+      total_times[FWD] / NITER * 1e3,
+      total_flops[FWD] / total_times[FWD] / nthreads / 1e9,
+      total_times[WGT_GRAD] / NITER * 1e3,
+      total_flops[WGT_GRAD] / total_times[WGT_GRAD] / nthreads / 1e9,
+      total_times[BWD] / NITER * 1e3,
+      total_flops[BWD] / total_times[BWD] / nthreads / 1e9);
 
   /////////////////////////////////////////////////////////////////////////////
   // print check sum for correctness check
