@@ -13,6 +13,7 @@
 #include <x86intrin.h>
 // #include <glog/logging.h>
 
+#define __TBB_PREVIEW_LIGHTWEIGHT_POLICY 1
 #include <tbb/flow_graph.h>
 #include <tbb/parallel_for.h>
 #include <tbb/partitioner.h>
@@ -328,12 +329,12 @@ int main(int argc, char **argv)
     dags[0].release_wait();
   });
 
-  vector<unique_ptr<continue_node<continue_msg>>> tbb_flow_nodes;
+  vector<unique_ptr<continue_node<continue_msg, lightweight>>> tbb_flow_nodes;
   vector<unique_ptr<graph_node>> cross_graph_edges;
   for (int l = 0; l < nlayers; ++l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
       tbb_flow_nodes.emplace_back(
-        new continue_node<continue_msg>(
+        new continue_node<continue_msg, lightweight>(
           dags[numa_node_id],
           FullyConnectedForward(
             activations[l].get(), weights[l].get(), activations[l + 1].get(),
