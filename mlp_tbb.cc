@@ -223,6 +223,215 @@ class FullyConnectedForward {
   mutable int iteration_;
 };
 
+class FullyConnectedBackward {
+ public:
+  FullyConnectedBackward(
+      Matrix<float, PAD>* input,
+      Matrix<float, PAD>* output_grad,
+      Matrix<float, PAD>* weight,
+      Matrix<float, PAD>* input_grad,
+      Matrix<float, PAD>* weight_grad,
+      int numa_node_id,
+      int layer_id,
+      int iteration)
+      : input_(input),
+        output_grad_(output_grad),
+        weight_(weight),
+        input_grad_(input_grad),
+        weight_grad_(weight_grad),
+        numa_node_id_(numa_node_id),
+        layer_id_(layer_id),
+        iteration_(iteration) {}
+
+  void operator()() const {
+    // weight gradient computation
+    double t0 = dsecnd();
+
+    int m = output_grad_->ncols(), n = input_->ncols(), k = input_->nrows();
+
+    tbb::parallel_for(
+        0,
+        nthreads_per_socket,
+        [&](size_t task_id) {
+          int tid = numa_node_id_ * nthreads_per_socket + tbb::task_arena::current_thread_index();
+          int m_begin, m_end, n_begin, n_end;
+
+          // partition k over socket
+          int k_per_socket = (k + nsockets - 1) / nsockets;
+          int k_begin = std::min(numa_node_id_ * k_per_socket, k);
+          int k_end = std::min(k_begin + k_per_socket, k);
+
+          // 2d partition m and n within socket
+          // weight_grad gemm performs well with aspect ratio
+          // 8 * (m_end - m_begin) ~= (n_end - n_begin)
+          float aspect_ratio = 1./2;
+          /*if (m == 512 && n == 1280) {
+            aspect_ratio = 2.;
+          }*/
+          get_intra_socket_2dpartition(
+              &m_begin,
+              &m_end,
+              &n_begin,
+              &n_end,
+              m,
+              n,
+              aspect_ratio,
+              true /* m_align */,
+              nthreads_per_socket,
+              task_id);
+          if (0 == iteration_ && 0 == tid) {
+            int mb = (m + m_end - m_begin - 1) / (m_end - m_begin);
+            int nb = (n + n_end - n_begin - 1) / (n_end - n_begin);
+            int kb = k / nsockets / (k_end - k_begin);
+            printf(
+                "wgt m %d n %d k %d bm %d bn %d bk %d mb %d nb %d kb %d\n",
+                m,
+                n,
+                k,
+                m_end - m_begin,
+                n_end - n_begin,
+                k_end - k_begin,
+                mb,
+                nb,
+                kb);
+            printf("numa_node = %d\n", numa_node_of_cpu(sched_getcpu()));
+          }
+
+          const float* A_begin = output_grad_->rawData(k_begin, m_begin);
+          cblas_sgemm(
+              CblasRowMajor,
+              CblasTrans,
+              CblasNoTrans,
+              m_end - m_begin,
+              n_end - n_begin,
+              k_end - k_begin,
+              1.0f,
+              A_begin,
+              output_grad_->ld(),
+              input_->rawData(k_begin, n_begin),
+              input_->ld(),
+              0.0f,
+              weight_grad_->rawData(numa_node_id_ * m + m_begin, n_begin),
+              weight_grad_->ld());
+
+          if (iteration_ >= NWARMUP) {
+            double dt = dsecnd() - t0;
+            double flops = 2. * m * n * k;
+#ifdef PRINT_PER_LAYER_PERFORMANCE
+            if (tid == 0) {
+              double gflops = flops / dt / 1e9;
+              printf(
+                "wgt_gradient layer %d %g ms %g GF/s %g GF/s/core\n",
+                layer_id_, dt * 1e3, gflops, gflops / nthreads);
+            }
+#endif
+            sum_times[tid][layer_id_][WGT_GRAD] += dt;
+            if (tid == 0) {
+              sum_flops[layer_id_][WGT_GRAD] += flops;
+            }
+          }
+        },
+        tbb::simple_partitioner());
+
+    // backward update
+    t0 = dsecnd();
+
+    m = input_->nrows(), n = input_->ncols(), k = output_grad_->ncols();
+    tbb::parallel_for(
+        0,
+        nthreads_per_socket,
+        [&](size_t task_id) {
+          int tid = numa_node_id_ * nthreads_per_socket + tbb::task_arena::current_thread_index();
+          int m_begin, m_end, n_begin, n_end;
+          // backward gemm performs well with aspect ratio
+          // (m_end - m_begin) ~= 32 * (n_end - n_begin)
+          float aspect_ratio = 1./2;
+          /*if (n == 512 && k == 512) {
+            aspect_ratio = 4.;
+          }
+          else if (n == 1280 && k == 512) {
+            aspect_ratio = 16.;
+          }*/
+          get_2dpartition(
+              &m_begin,
+              &m_end,
+              &n_begin,
+              &n_end,
+              m,
+              n,
+              aspect_ratio,
+              false /* m_align */,
+              numa_node_id_,
+              nthreads_per_socket,
+              task_id);
+          if (0 == iteration_ && 0 == tid) {
+            int mb =
+                (m / nsockets + m_end - m_begin - 1) / (m_end - m_begin);
+            int nb = (n + n_end - n_begin - 1) / (n_end - n_begin);
+            printf(
+                "bwd m %d n %d k %d bm %d bn %d bk %d mb %d nb %d kb %d\n",
+                m,
+                n,
+                k,
+                m_end - m_begin,
+                n_end - n_begin,
+                k,
+                mb,
+                nb,
+                1);
+            printf("numa_node = %d\n", numa_node_of_cpu(sched_getcpu()));
+          }
+
+          const float *A_begin = output_grad_->rawData(m_begin, 0);
+          cblas_sgemm(
+              CblasRowMajor,
+              CblasNoTrans,
+              CblasNoTrans,
+              m_end - m_begin,
+              n_end - n_begin,
+              k,
+              1.0f,
+              A_begin,
+              output_grad_->ld(),
+              weight_->rawData(numa_node_id_ * k, n_begin),
+              weight_->ld(),
+              0.0f,
+              input_grad_->rawData(m_begin, n_begin),
+              input_grad_->ld());
+
+          if (iteration_ >= NWARMUP) {
+            double dt = dsecnd() - t0;
+            double flops = 2. * m * n * k;
+#ifdef PRINT_PER_LAYER_PERFORMANCE
+            if (tid == 0) {
+              double gflops = flops / dt / 1e9;
+              printf(
+                "bwd layer %d %g ms %g GF/s %g GF/s/core\n",
+                layer_id_, dt * 1e3, gflops, gflops / nthreads);
+            }
+#endif
+            sum_times[tid][layer_id_][BWD] += dt;
+            if (tid == 0) {
+              sum_flops[layer_id_][BWD] += flops;
+            }
+          }
+        },
+        tbb::simple_partitioner());
+
+    ++iteration_;
+  }
+
+  void operator()(flow::continue_msg) {
+    FullyConnectedBackward::operator()();
+  }
+
+ private:
+  Matrix<float, PAD> *input_, *input_grad_, *weight_, *output_grad_, *weight_grad_;
+  int numa_node_id_, layer_id_;
+  mutable int iteration_;
+};
+
+
 // Create a thin async_node at each cross-graph edge.
 // It prevents task bypassing which would violate affinity.
 // The passed-in graph object must be the receiver's graph
@@ -331,6 +540,7 @@ int main(int argc, char **argv)
 
   vector<unique_ptr<continue_node<continue_msg, lightweight>>> tbb_flow_nodes;
   vector<unique_ptr<graph_node>> cross_graph_edges;
+  // forward
   for (int l = 0; l < nlayers; ++l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
       tbb_flow_nodes.emplace_back(
@@ -351,8 +561,28 @@ int main(int argc, char **argv)
             *tbb_flow_nodes[(l - 1) * nsockets + numa_node_id],
             *tbb_flow_nodes.back());
       }
+    } // for each socket
+  } // for each layer
+  // backward
+  for (int l = nlayers - 1; l >= 0; --l) {
+    for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
+      tbb_flow_nodes.emplace_back(
+        new continue_node<continue_msg, lightweight>(
+          dags[numa_node_id],
+          FullyConnectedBackward(
+            activations[l].get(), // input
+            activations[l + 1].get(), // output_grad
+            weights[l].get(),
+            activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
+            weight_grads[l].get(),
+            numa_node_id, l, 0)));
 
-      if (l == nlayers - 1) {
+      make_edge(
+          *tbb_flow_nodes
+              [(nlayers + (nlayers - 1 - l) - 1) * nsockets + numa_node_id],
+          *tbb_flow_nodes.back());
+
+      if (l == 0) {
         if (numa_node_id == 0) {
           make_edge(*tbb_flow_nodes.back(), dag_exit);
         } else {
@@ -375,12 +605,6 @@ int main(int argc, char **argv)
     for (int l = 0; l < nlayers; ++l) {
       double t0 = dsecnd();
 
-      int m = batch_size, n = nfeatures[l + 1], k = nfeatures[l];
-
-      // forward gemm performs well with aspect ratio
-      // (m_end - m_begin) ~= 32 * (n_end - n_begin)
-      float aspect_ratio = 4.;
-
       for (int sid = nsockets - 1; sid >= 1; --sid) {
         tbb_arena[sid]->enqueue([&, sid, l, it]{ tg[sid].run(
           FullyConnectedForward(
@@ -398,192 +622,30 @@ int main(int argc, char **argv)
     } // for each layer
 
     // backward
-//     for (int l = nlayers - 1; l >= 0; --l) {
-//       // weight gradient computation
-//       double t0 = dsecnd();
-//
-//       int m = nfeatures[l + 1], n = nfeatures[l], k = batch_size;
-//
-//       for (int sid = 0; sid < nsockets; ++sid) {
-//         tbb_arena[sid]->execute([&]() {
-//           tbb::parallel_for(
-//               0,
-//               nthreads_per_socket,
-//               [&](size_t task_id) {
-//                 int tid = sid * nthreads_per_socket + task_id;
-//                 int m_begin, m_end, n_begin, n_end;
-//
-//                 // partition k over socket
-//                 int k_per_socket = (k + nsockets - 1) / nsockets;
-//                 int k_begin = std::min(sid * k_per_socket, k);
-//                 int k_end = std::min(k_begin + k_per_socket, k);
-//
-//                 // 2d partition m and n within socket
-//                 // weight_grad gemm performs well with aspect ratio
-//                 // 8 * (m_end - m_begin) ~= (n_end - n_begin)
-//                 float aspect_ratio = 1./2;
-//                 /*if (m == 512 && n == 1280) {
-//                   aspect_ratio = 2.;
-//                 }*/
-//                 get_intra_socket_2dpartition(
-//                     &m_begin,
-//                     &m_end,
-//                     &n_begin,
-//                     &n_end,
-//                     m,
-//                     n,
-//                     aspect_ratio,
-//                     true /* m_align */,
-//                     nthreads_per_socket,
-//                     task_id);
-//                 if (0 == it && 0 == tid) {
-//                   int mb = (m + m_end - m_begin - 1) / (m_end - m_begin);
-//                   int nb = (n + n_end - n_begin - 1) / (n_end - n_begin);
-//                   int kb = k / nsockets / (k_end - k_begin);
-//                   printf(
-//                       "wgt m %d n %d k %d bm %d bn %d bk %d mb %d nb %d kb %d\n",
-//                       m,
-//                       n,
-//                       k,
-//                       m_end - m_begin,
-//                       n_end - n_begin,
-//                       k_end - k_begin,
-//                       mb,
-//                       nb,
-//                       kb);
-//                   printf("numa_node = %d\n", numa_node_of_cpu(sched_getcpu()));
-//                 }
-//
-//                 const float* A_begin =
-//                     activations[l + 1]->rawData(k_begin, m_begin);
-//                 cblas_sgemm(
-//                     CblasRowMajor,
-//                     CblasTrans,
-//                     CblasNoTrans,
-//                     m_end - m_begin,
-//                     n_end - n_begin,
-//                     k_end - k_begin,
-//                     1.0f,
-//                     A_begin,
-//                     activations[l + 1]->ld(),
-//                     activations[l]->rawData(k_begin, n_begin),
-//                     activations[l]->ld(),
-//                     0.0f,
-//                     weight_grads[l]->rawData(sid * m + m_begin, n_begin),
-//                     weight_grads[l]->ld());
-//
-//                 if (it >= NWARMUP) {
-//                   double dt = dsecnd() - t0;
-//                   double flops = 2. * m * n * k;
-// #ifdef PRINT_PER_LAYER_PERFORMANCE
-//                   if (tid == 0) {
-//                     double gflops = flops / dt / 1e9;
-//                     printf(
-//                       "wgt_gradient layer %d %g ms %g GF/s %g GF/s/core\n",
-//                       l, dt * 1e3, gflops, gflops / nthreads);
-//                   }
-// #endif
-//                   sum_times[tid][l][WGT_GRAD] += dt;
-//                   if (tid == 0) {
-//                     sum_flops[l][WGT_GRAD] += flops;
-//                   }
-//                 }
-//               },
-//               *tbb_affinity_partitioners[sid]);
-//         }); // arena execute
-//       } // sid
-//
-//       // backward update
-//       t0 = dsecnd();
-//
-//       m = batch_size, n = nfeatures[l], k = nfeatures[l + 1];
-//       for (int sid = 0; sid < nsockets; ++sid) {
-//         tbb_arena[sid]->execute([&]() {
-//           tbb::parallel_for(
-//               0,
-//               nthreads_per_socket,
-//               [&](size_t task_id) {
-//                 int tid = sid * nthreads_per_socket + task_id;
-//                 int m_begin, m_end, n_begin, n_end;
-//                 // backward gemm performs well with aspect ratio
-//                 // (m_end - m_begin) ~= 32 * (n_end - n_begin)
-//                 float aspect_ratio = 1./2;
-//                 /*if (n == 512 && k == 512) {
-//                   aspect_ratio = 4.;
-//                 }
-//                 else if (n == 1280 && k == 512) {
-//                   aspect_ratio = 16.;
-//                 }*/
-//                 get_2dpartition(
-//                     &m_begin,
-//                     &m_end,
-//                     &n_begin,
-//                     &n_end,
-//                     m,
-//                     n,
-//                     aspect_ratio,
-//                     false /* m_align */,
-//                     sid,
-//                     nthreads_per_socket,
-//                     task_id);
-//                 if (0 == it && 0 == tid) {
-//                   int mb =
-//                       (m / nsockets + m_end - m_begin - 1) / (m_end - m_begin);
-//                   int nb = (n + n_end - n_begin - 1) / (n_end - n_begin);
-//                   printf(
-//                       "bwd m %d n %d k %d bm %d bn %d bk %d mb %d nb %d kb %d\n",
-//                       m,
-//                       n,
-//                       k,
-//                       m_end - m_begin,
-//                       n_end - n_begin,
-//                       k,
-//                       mb,
-//                       nb,
-//                       1);
-//                   printf("numa_node = %d\n", numa_node_of_cpu(sched_getcpu()));
-//                 }
-//
-//                 const float *A_begin = activations[l + 1]->rawData(m_begin, 0);
-//                 Matrix<float, PAD>* C =
-//                     activations[l == 0 ? nlayers + 1 : l].get();
-//                 cblas_sgemm(
-//                     CblasRowMajor,
-//                     CblasNoTrans,
-//                     CblasNoTrans,
-//                     m_end - m_begin,
-//                     n_end - n_begin,
-//                     k,
-//                     1.0f,
-//                     A_begin,
-//                     activations[l + 1]->ld(),
-//                     weights[l]->rawData(sid * k, n_begin),
-//                     weights[l]->ld(),
-//                     0.0f,
-//                     C->rawData(m_begin, n_begin),
-//                     C->ld());
-//
-//                 if (it >= NWARMUP) {
-//                   double dt = dsecnd() - t0;
-//                   double flops = 2. * m * n * k;
-// #ifdef PRINT_PER_LAYER_PERFORMANCE
-//                   if (tid == 0) {
-//                     double gflops = flops / dt / 1e9;
-//                     printf(
-//                       "bwd layer %d %g ms %g GF/s %g GF/s/core\n",
-//                       l, dt * 1e3, gflops, gflops / nthreads);
-//                   }
-// #endif
-//                   sum_times[tid][l][BWD] += dt;
-//                   if (tid == 0) {
-//                     sum_flops[l][BWD] += flops;
-//                   }
-//                 }
-//               },
-//               *tbb_affinity_partitioners[sid]);
-//         }); // arena execute
-//       } // sid
-//     } // for each layer
+    for (int l = nlayers - 1; l >= 0; --l) {
+      for (int sid = nsockets - 1; sid >= 1; --sid) {
+        tbb_arena[sid]->enqueue([&, sid, l, it]{ tg[sid].run(
+          FullyConnectedBackward(
+            activations[l].get(), // input
+            activations[l + 1].get(), // output_grad
+            weights[l].get(),
+            activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
+            weight_grads[l].get(),
+            sid, l, it)); });
+      } // sid
+
+      int sid = 0;
+      tbb_arena[sid]->execute([&, sid, l, it]{ tg[sid].run(
+        FullyConnectedBackward(
+            activations[l].get(), // input
+            activations[l + 1].get(), // output_grad
+            weights[l].get(),
+            activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
+            weight_grads[l].get(),
+            sid, l, it)); });
+
+      tbb_arena[0]->execute([&tg]{ tg[0].wait(); });
+    } // for each layer
   } // for each iteration
 
   /////////////////////////////////////////////////////////////////////////////
