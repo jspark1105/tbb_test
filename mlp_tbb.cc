@@ -87,10 +87,6 @@ class pinning_observer : public tbb::task_scheduler_observer {
        }
 #endif
   }
-    
-  bool may_sleep() override {
-     return false;
-  }
 
   void on_scheduler_exit(bool /*unused*/){
 #if THREAD_INFO
