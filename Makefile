@@ -29,8 +29,9 @@ else
   OPT = -O3 -DNDEBUG
 endif
 
-#CXX = icc
-CC = icpc -std=c++11 
+#CXX = g++
+CXX = icpc
+CC = ${CXX} -std=c++11 
 LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_rt -L${NUMAROOT}/lib -lnuma -L${TBBROOT}/lib -ltbb -L/usr/lib -L/nfs/site/proj/openmp/compilers/intel/19.0/Linux/install/update1/compilers_and_libraries_2019.1.144/linux/compiler/lib/intel64 -liomp5
 
 mlp_omp: mlp_omp.o Partition.o Rand.o TwistedHyperCube.o
