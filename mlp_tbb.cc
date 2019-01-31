@@ -496,13 +496,13 @@ int main(int argc, char **argv)
   } // for each layer
 #endif
 
-  //bool use_flow_graph = false;
-  //for (int it = 0; it < NWARMUP + NITER; ++it) {
-    //if (use_flow_graph) {
-      //tbb_arena[0]->execute([&dag_root] { dag_root.try_put(continue_msg()); });
-      //tbb_arena[0]->execute([&dags] { dags[0].wait_for_all(); });
-      //continue;
-    //}
+//  bool use_flow_graph = false;
+//  for (int it = 0; it < NWARMUP + NITER; ++it) {
+//    if (use_flow_graph) {
+//      tbb_arena[0]->execute([&dag_root] { dag_root.try_put(continue_msg()); });
+//      tbb_arena[0]->execute([&dags] { dags[0].wait_for_all(); });
+//      continue;
+//    }
 
 #if USE_FG 
      printf("Using Flow Graph\n");
