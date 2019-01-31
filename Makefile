@@ -32,7 +32,7 @@ endif
 #CXX ?= g++
 CXX ?= icpc
 CC = ${CXX} -std=c++11 
-LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_rt -L${NUMAROOT}/lib -lnuma -L${TBBROOT}/lib -ltbb -L/usr/lib -liomp5
+LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_core -lmkl_sequential -L${NUMAROOT}/lib -lnuma -L${TBBROOT}/lib -ltbb -L/usr/lib -liomp5
 
 mlp_omp: mlp_omp.o Partition.o Rand.o TwistedHyperCube.o
 	$(CC) $(OPT) $(CFLAGS) -o $@ $^ $(LDFLAGS)
