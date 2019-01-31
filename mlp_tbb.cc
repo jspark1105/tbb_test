@@ -42,9 +42,7 @@ constexpr int PAD = 16;
 constexpr int CACHE_LINE_LEN = 16;
 int nthreads_per_socket;
 
-#if USE_FEWER_BINDS
 thread_local int my_last_sid = -1;
-#endif
 
 class pinning_observer : public tbb::task_scheduler_observer {
  public:
@@ -55,39 +53,37 @@ class pinning_observer : public tbb::task_scheduler_observer {
 
   void on_scheduler_entry(bool /* unused */) override {
 #if THREAD_INFO
-    std::stringstream ss;
-    ss << "OBSERVER ENTRY," << std::this_thread::get_id() << "," << numa_node_id_ <<","  << this  << std::endl;
-    printf("%s", ss.str().c_str());
+        std::stringstream ss;
+        ss << "OBSERVER ENTRY," << std::this_thread::get_id() << "," << numa_node_id_ <<","  << this  << std::endl;
+        printf("%s", ss.str().c_str());
 #endif
-#if USE_FEWER_BINDS
-	if(my_last_sid == numa_node_id_){
-		return;	
-	} 
+        if(my_last_sid == numa_node_id_){
+            return;
+        }
         my_last_sid = numa_node_id_;
-#endif
-#if NUMA_BIND    	
+#if NUMA_BIND
         auto bm = numa_allocate_nodemask();
-    	numa_bitmask_clearall(bm);
-    	numa_bitmask_setbit(bm, numa_node_id_);
-    	numa_bind(bm);
-    	numa_bitmask_free(bm);
+        numa_bitmask_clearall(bm);
+        numa_bitmask_setbit(bm, numa_node_id_);
+        numa_bind(bm);
+        numa_bitmask_free(bm);
 #endif
 #if CORE_PINNING
-    	if (numa_node_id_ != -1) {
-      		cpu_set_t cpuset;
-      		CPU_ZERO(&cpuset);
-      		int tid = tbb::task_arena::current_thread_index();
-	        int ncores_per_socket =
-          		std::thread::hardware_concurrency() / numa_num_configured_nodes() / 2;
-	        CPU_SET(tid + numa_node_id_ * ncores_per_socket, &cpuset);
-	        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        if (numa_node_id_ != -1) {
+              cpu_set_t cpuset;
+              CPU_ZERO(&cpuset);
+              int tid = tbb::task_arena::current_thread_index();
+              int ncores_per_socket =
+                  std::thread::hardware_concurrency() / numa_num_configured_nodes() / 2;
+              CPU_SET(tid + numa_node_id_ * ncores_per_socket, &cpuset);
+              pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
         } else {
-      		cpu_set_t cpuset;
-	        CPU_ZERO(&cpuset);
-	        for (int i = 0; i < std::thread::hardware_concurrency(); ++i) {
-        		CPU_SET(i, &cpuset);
-	        }
-        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            for (int i = 0; i < std::thread::hardware_concurrency(); ++i) {
+                CPU_SET(i, &cpuset);
+            }
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
        }
 #endif
   }
@@ -132,15 +128,7 @@ Matrix<float, PAD> *
               }
             }
           },
-#if AFFINITY          
-          *tbb_affinity_partitioners[sid]);
-#endif
-#if STATIC
-          tbb::static_partitioner());
-#endif
-#if SIMPLE
           tbb::simple_partitioner());
-#endif
     });
   }
 
@@ -192,7 +180,7 @@ class FullyConnectedForward {
   void operator()() const {
     double t0 = dsecnd();
     int m = input_->nrows(), n = output_->ncols(), k = input_->ncols();
-    
+
 #if COUNT_NODES
     ++num_node_executions;
 #endif
@@ -202,7 +190,7 @@ class FullyConnectedForward {
 
     tbb::parallel_for(
       0,
-      nthreads_per_socket,
+      SP*nthreads_per_socket,
       [&](size_t task_id) {
         double sgst = dsecnd();
         int tid = numa_node_id_ * nthreads_per_socket + task_id;
@@ -217,7 +205,7 @@ class FullyConnectedForward {
             aspect_ratio,
             false /* m_align */,
             numa_node_id_,
-            nthreads_per_socket,
+            SP*nthreads_per_socket,
             task_id);
 
         cblas_sgemm(
@@ -262,16 +250,8 @@ class FullyConnectedForward {
 #endif
 
       },
-#if AFFINITY
-      *(*tbb_affinity_partitioners_)[numa_node_id_]);
-#endif
-#if STATIC
-      tbb::static_partitioner());
-#endif
-#if SIMPLE
       tbb::simple_partitioner());
-#endif
-     
+
 #if POST_VALIDATION
       mtx.lock();
       if (iteration_ == 257 && layer_id_ == 6)
@@ -279,7 +259,7 @@ class FullyConnectedForward {
         float* fptr = output_->rawData(); 
         for(int i = 0; i<100 ;i++)
         {
-	   if(i==0)
+           if(i==0)
               cout << "Validation - Socket ID:" << numa_node_id_ << std::endl; 
            cout << *fptr << ",";
            fptr++;
@@ -340,15 +320,6 @@ int main(int argc, char **argv)
 #if NUMA_BIND
   printf("Enabled NUMA Bind\n");
 #endif
-#if AFFINITY
-  printf("Using Affinity Partitioner\n");
-#endif
-#if STATIC
-  printf("Using static Partitioner\n");
-#endif
-#if SIMPLE
-  printf("Using simple partitioner\n");
-#endif
 #if COUNT_NODES
   num_node_executions = 0;
 #endif
@@ -362,10 +333,7 @@ int main(int argc, char **argv)
   // tbb_affinity_partitioners.resize(nsockets);
   for (int s = 0; s < nsockets; ++s) {
     tbb_arena.emplace_back(new tbb::task_arena(nthreads_per_socket, s == 0));
-	tbb_observers.emplace_back(new pinning_observer(*tbb_arena[s], s));
-#if AFFINITY
-    tbb_affinity_partitioners.emplace_back(new tbb::affinity_partitioner());
-#endif
+    tbb_observers.emplace_back(new pinning_observer(*tbb_arena[s], s));
   }
 
   unique_ptr<Matrix<float, PAD>>
@@ -436,7 +404,7 @@ int main(int argc, char **argv)
     dags[0].release_wait();
   });
 
-#if USE_LIGHTWEIGHT_NOFL
+#if USE_LIGHTWEIGHT
   printf("Using Lightweight except first layer\n");
   typedef continue_node<continue_msg> cn_type;
   typedef continue_node<continue_msg, lightweight> light_cn_type;
@@ -495,12 +463,7 @@ int main(int argc, char **argv)
     } // for each socket
   } // for each layer
 #else 
-#if USE_LIGHTWEIGHT
-  printf("Using Lightweight\n");
-  typedef continue_node<continue_msg, lightweight> cn_type;
-#else
   typedef continue_node<continue_msg> cn_type;
-#endif  
   vector<unique_ptr<cn_type>> tbb_flow_nodes;
   vector<unique_ptr<graph_node>> cross_graph_edges;
   for (int l = 0; l < nlayers; ++l) {
@@ -844,7 +807,7 @@ int main(int argc, char **argv)
     total_times[NUM_BREAKDOWNS] = { 0 }, total_flops[NUM_BREAKDOWNS] = { 0 };
   for (int l = 0; l < nlayers; ++l) {
 #if POST_VALIDATION
-#else												
+#else
     printf(
       "[layer %d] fwd %g ms/iter (%g GF/s/core) imbalance %g, "
       "wgt_grad %g ms/iter (%g GF/s/core) imbalance %g, "
@@ -867,7 +830,7 @@ int main(int argc, char **argv)
   } // for each layer
 
 #if POST_VALIDATION
-#else												
+#else
   printf(
     "total fwd %g ms/iter (%g GF/s/core), "
     "wgt_grad %g ms/iter (%g GF/s/core), "
@@ -895,7 +858,7 @@ int main(int argc, char **argv)
     }
     l2_norm = sqrt(l2_norm);
 #if POST_VALIDATION
-#else												
+#else
     printf("layer %d l1 %g l2 %g trace %g\n", l, l1_norm, l2_norm, trace);
 #endif
   }

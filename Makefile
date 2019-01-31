@@ -14,17 +14,13 @@ dep = $(obj:.o=.d)  # one dependency file for each source
 #seq = y
 SP ?=1
 UBN ?=0
-UFB ?=0
 TI  ?=0
 FG  ?=1
-NB  ?=1
+NB  ?=0
 CP  ?=1
-AF  ?=0
-SI  ?=1
-ST  ?=0
-NFL ?=0
 LT  ?=0
-DEFINES = -DSP=${SP} -DPOST_VALIDATION=0 -DUSE_BROADCAST_NODE=$(UBN) -DUSE_FEWER_BINDS=$(UFB) -DENABLE_TBB=1 -DTHREAD_INFO=$(TI) -DTIME_FG_LOOP=1 -DCOUNT_NODES=1 -DUSE_FG=$(FG) -DNUMA_BIND=$(NB) -DCORE_PINNING=$(CP) -DAFFINITY=$(AF) -DSIMPLE=$(SI) -DSTATIC=$(ST) -DUSE_LIGHTWEIGHT_NOFL=$(NFL) -DUSE_LIGHTWEIGHT=$(LT) 
+DEFINES = "-DSP=${SP} -DPOST_VALIDATION=0 -DUSE_BROADCAST_NODE=$(UBN) -DENABLE_TBB=1 -DTHREAD_INFO=$(TI) 
+           -DTIME_FG_LOOP=1 -DCOUNT_NODES=1 -DUSE_FG=$(FG) -DNUMA_BIND=$(NB) -DCORE_PINNING=$(CP) -DUSE_LIGHTWEIGHT=$(LT)"
 CFLAGS =  -DMKL_ILP64 -m64 -I${MKLROOT}/include -I${NUMAROOT}/include -I${TBBROOT}/include -mavx2 -mfma -mf16c -fopenmp -Wall -mavx512f -march=skylake
 
 ifdef debug
@@ -33,6 +29,7 @@ else
   OPT = -O3 -DNDEBUG
 endif
 
+#CXX = icc
 CC = icpc -std=c++11 
 LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_rt -L${NUMAROOT}/lib -lnuma -L${TBBROOT}/lib -ltbb -L/usr/lib -L/nfs/site/proj/openmp/compilers/intel/19.0/Linux/install/update1/compilers_and_libraries_2019.1.144/linux/compiler/lib/intel64 -liomp5
 
