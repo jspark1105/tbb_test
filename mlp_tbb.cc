@@ -75,7 +75,6 @@ class pinning_observer : public tbb::task_scheduler_observer {
 
 vector<unique_ptr<tbb::task_arena>> tbb_arena;
 vector<unique_ptr<pinning_observer>> tbb_observers;
-vector<unique_ptr<tbb::affinity_partitioner>> tbb_affinity_partitioners;
 
 Matrix<float, PAD>* create_matrix_with_numa_aware_allocation(
     int nrows,
@@ -96,7 +95,7 @@ Matrix<float, PAD>* create_matrix_with_numa_aware_allocation(
               }
             }
           },
-          *tbb_affinity_partitioners[sid]);
+          tbb::simple_partitioner());
     });
   }
 
@@ -459,11 +458,9 @@ int main(int argc, char** argv) {
   omp_set_num_threads(1);
 
   tbb::task_scheduler_init scheduler_init(nthreads);
-  // tbb_affinity_partitioners.resize(nsockets);
   for (int s = 0; s < nsockets; ++s) {
     tbb_arena.emplace_back(new tbb::task_arena(nthreads_per_socket, s == 0));
     tbb_observers.emplace_back(new pinning_observer(*tbb_arena[s], s));
-    tbb_affinity_partitioners.emplace_back(new tbb::affinity_partitioner());
   }
 
   int batch_size = 1024 * nsockets; // weak-scaling with nsockets
