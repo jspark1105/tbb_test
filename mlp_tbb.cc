@@ -164,14 +164,12 @@ class FullyConnectedForward {
       Matrix<float, PAD>* output,
       int numa_node_id,
       int layer_id,
-      int iteration,
-      vector<unique_ptr<tbb::affinity_partitioner>> *tbb_affinity_partitioners)
+      int iteration)
       : input_(input),
         weight_(weight),
         output_(output),
         numa_node_id_(numa_node_id),
         layer_id_(layer_id),
-        tbb_affinity_partitioners_(tbb_affinity_partitioners),
         iteration_(iteration) {}
 
   void operator()() const {
@@ -482,7 +480,6 @@ class FullyConnectedBackward {
       *weight_grad_;
   int numa_node_id_, layer_id_;
   mutable int iteration_;
-  vector<unique_ptr<tbb::affinity_partitioner>> *tbb_affinity_partitioners_;
 };
 
 // Create a thin async_node at each cross-graph edge.
@@ -620,7 +617,7 @@ int main(int argc, char **argv)
                     dags[numa_node_id],
                     FullyConnectedForward(
                         activations[l].get(), weights[l].get(), activations[l + 1].get(),
-                        numa_node_id, l, 0, &tbb_affinity_partitioners)
+                        numa_node_id, l, 0)
                 )
             );
 
@@ -638,7 +635,7 @@ int main(int argc, char **argv)
                     dags[numa_node_id],
                     FullyConnectedForward(
                         activations[l].get(), weights[l].get(), activations[l + 1].get(),
-                        numa_node_id, l, 0, &tbb_affinity_partitioners)
+                        numa_node_id, l, 0)
                )
             );
             if(l==1){
@@ -675,7 +672,7 @@ int main(int argc, char **argv)
             dags[numa_node_id],
             FullyConnectedForward(
                activations[l].get(), weights[l].get(), activations[l + 1].get(),
-               numa_node_id, l, 0, &tbb_affinity_partitioners)
+               numa_node_id, l, 0)
         ));
       if (l == 0) {
         if (numa_node_id == 0) {
@@ -771,14 +768,14 @@ int main(int argc, char **argv)
         tbb_arena[sid]->execute([&, sid, l, it]{ tg[sid].run(
           FullyConnectedForward(
             activations[l].get(), weights[l].get(), activations[l + 1].get(),
-            sid, l, it, &tbb_affinity_partitioners)); });
+            sid, l, it)); });
       } // sid
 
       int sid = 0;
       tbb_arena[sid]->execute([&, sid, l, it]{ tg[sid].run(
         FullyConnectedForward(
           activations[l].get(), weights[l].get(), activations[l + 1].get(),
-          sid, l, it, &tbb_affinity_partitioners)); });
+          sid, l, it)); });
 
       tbb_arena[0]->execute([&tg]{ tg[0].wait(); });
     } // for each layer

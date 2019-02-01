@@ -18,7 +18,7 @@ TI  ?=0
 FG  ?=1
 NB  ?=0
 CP  ?=1
-LT  ?=0
+LT  ?=1
 DEFINES = -DSP=${SP} -DPOST_VALIDATION=0 -DUSE_BROADCAST_NODE=$(UBN) -DENABLE_TBB=1 -DTHREAD_INFO=$(TI)
 DEFINES+= -DTIME_FG_LOOP=1 -DCOUNT_NODES=1 -DUSE_FG=$(FG) -DNUMA_BIND=$(NB) -DCORE_PINNING=$(CP) -DUSE_LIGHTWEIGHT=$(LT)
 CFLAGS =  -DMKL_ILP64 -m64 -I${MKLROOT}/include -I${NUMAROOT}/include -I${TBBROOT}/include -mavx2 -mfma -mf16c -fopenmp -Wall -mavx512f -march=skylake
@@ -30,7 +30,7 @@ else
 endif
 
 #CXX ?= g++
-CXX ?= icpc
+CXX = icpc
 CC = ${CXX} -std=c++11 
 LDFLAGS = -L${MKLROOT}/lib/intel64 -lmkl_intel_lp64 -lmkl_core -lmkl_sequential -L${NUMAROOT}/lib -lnuma -L${TBBROOT}/lib -ltbb -L/usr/lib -liomp5
 
