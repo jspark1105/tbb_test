@@ -13,7 +13,6 @@
 #include <x86intrin.h>
 // #include <glog/logging.h>
 
-#define __TBB_PREVIEW_LIGHTWEIGHT_POLICY 1
 #include <tbb/flow_graph.h>
 #include <tbb/parallel_for.h>
 #include <tbb/partitioner.h>
@@ -519,17 +518,16 @@ int main(int argc, char** argv) {
 
   using namespace tbb::flow;
 
-  continue_node<continue_msg> dag_root(
-      dags[0], [&dags](continue_msg) { dags[0].reserve_wait(); });
-  continue_node<continue_msg> dag_exit(
-      dags[0], [&dags](continue_msg) { dags[0].release_wait(); });
+  typedef continue_node<continue_msg> cn_type;
+  cn_type dag_root(dags[0], [&dags](continue_msg) { dags[0].reserve_wait(); });
+  cn_type dag_exit(dags[0], [&dags](continue_msg) { dags[0].release_wait(); });
 
-  vector<unique_ptr<continue_node<continue_msg, lightweight>>> tbb_flow_nodes;
+  vector<unique_ptr<cn_type>> tbb_flow_nodes;
   vector<unique_ptr<graph_node>> cross_graph_edges;
   // forward
   for (int l = 0; l < nlayers; ++l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
-      tbb_flow_nodes.emplace_back(new continue_node<continue_msg, lightweight>(
+      tbb_flow_nodes.emplace_back(new cn_type(
           dags[numa_node_id],
           FullyConnectedForward(
               activations[l].get(),
@@ -555,7 +553,7 @@ int main(int argc, char** argv) {
   // backward
   for (int l = nlayers - 1; l >= 0; --l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
-      tbb_flow_nodes.emplace_back(new continue_node<continue_msg, lightweight>(
+      tbb_flow_nodes.emplace_back(new cn_type(
           dags[numa_node_id],
           FullyConnectedBackward(
               activations[l].get(), // input
