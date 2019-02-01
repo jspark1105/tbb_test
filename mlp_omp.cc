@@ -508,6 +508,7 @@ int main(int argc, char** argv) {
   // Main computation
 
   constexpr int NWARMUP = 2, NITER = 256;
+  double fg_t0 = dsecnd();
 #pragma omp parallel
   {
     int sid = get_socket_num();
@@ -827,7 +828,7 @@ int main(int argc, char** argv) {
       } // for each layer
     } // for each iteration
   } // omp parallel
-
+  double omp_total_time = dsecnd() - fg_t0;
   /////////////////////////////////////////////////////////////////////////////
   // compute load imbalance
   double load_imbalance[nlayers][NUM_BREAKDOWNS];
@@ -958,6 +959,6 @@ int main(int argc, char** argv) {
     l2_norm = sqrt(l2_norm);
     printf("layer %d l1 %g l2 %g trace %g\n", l, l1_norm, l2_norm, trace);
   }
-
+  printf("total time for loop = %g\n", omp_total_time);
   return 0;
 }
