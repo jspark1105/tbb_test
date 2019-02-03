@@ -581,73 +581,9 @@ int main(int argc, char** argv) {
     } // for each socket
   } // for each layer
 
-  bool use_flow_graph = true;
   for (int it = 0; it < NWARMUP + NITER; ++it) {
-    if (use_flow_graph) {
-      tbb_arena[0]->execute([&dag_root] { dag_root.try_put(continue_msg()); });
-      tbb_arena[0]->execute([&dags] { dags[0].wait_for_all(); });
-      continue;
-    }
-
-    // forward
-    for (int l = 0; l < nlayers; ++l) {
-      for (int sid = nsockets - 1; sid >= 1; --sid) {
-        tbb_arena[sid]->enqueue([&, sid, l, it] {
-          tg[sid].run(FullyConnectedForward(
-              activations[l].get(),
-              weights[l].get(),
-              activations[l + 1].get(),
-              sid,
-              l,
-              it));
-        });
-      } // sid
-
-      int sid = 0;
-      tbb_arena[sid]->execute([&, sid, l, it] {
-        tg[sid].run(FullyConnectedForward(
-            activations[l].get(),
-            weights[l].get(),
-            activations[l + 1].get(),
-            sid,
-            l,
-            it));
-      });
-
-      tbb_arena[0]->execute([&tg] { tg[0].wait(); });
-    } // for each layer
-
-    // backward
-    for (int l = nlayers - 1; l >= 0; --l) {
-      for (int sid = nsockets - 1; sid >= 1; --sid) {
-        tbb_arena[sid]->enqueue([&, sid, l, it] {
-          tg[sid].run(FullyConnectedBackward(
-              activations[l].get(), // input
-              activations[l + 1].get(), // output_grad
-              weights[l].get(),
-              activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
-              weight_grads[l].get(),
-              sid,
-              l,
-              it));
-        });
-      } // sid
-
-      int sid = 0;
-      tbb_arena[sid]->execute([&, sid, l, it] {
-        tg[sid].run(FullyConnectedBackward(
-            activations[l].get(), // input
-            activations[l + 1].get(), // output_grad
-            weights[l].get(),
-            activations[l == 0 ? nlayers + 1 : l].get(), // input_grad
-            weight_grads[l].get(),
-            sid,
-            l,
-            it));
-      });
-
-      tbb_arena[0]->execute([&tg] { tg[0].wait(); });
-    } // for each layer
+    tbb_arena[0]->execute([&dag_root] { dag_root.try_put(continue_msg()); });
+    tbb_arena[0]->execute([&dags] { dags[0].wait_for_all(); });
   } // for each iteration
 
   /////////////////////////////////////////////////////////////////////////////
