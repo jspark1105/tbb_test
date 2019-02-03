@@ -581,10 +581,15 @@ int main(int argc, char** argv) {
     } // for each socket
   } // for each layer
 
+  double wall_clock_time = 0;
   for (int it = 0; it < NWARMUP + NITER; ++it) {
+    if (it == NWARMUP) {
+      wall_clock_time = dsecnd();
+    }
     tbb_arena[0]->execute([&dag_root] { dag_root.try_put(continue_msg()); });
     tbb_arena[0]->execute([&dags] { dags[0].wait_for_all(); });
   } // for each iteration
+  wall_clock_time = dsecnd() - wall_clock_time;
 
   /////////////////////////////////////////////////////////////////////////////
   // compute load imbalance
@@ -659,6 +664,7 @@ int main(int argc, char** argv) {
       total_flops[WGT_GRAD] / total_times[WGT_GRAD] / nthreads / 1e9,
       total_times[BWD] / NITER * 1e3,
       total_flops[BWD] / total_times[BWD] / nthreads / 1e9);
+  printf("wall clock time %g ms/iter\n", wall_clock_time / NITER * 1e3);
 
   /////////////////////////////////////////////////////////////////////////////
   // print check sum for correctness check

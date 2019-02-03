@@ -508,6 +508,7 @@ int main(int argc, char** argv) {
   // Main computation
 
   constexpr int NWARMUP = 2, NITER = 256;
+  double wall_clock_time = 0;
 #pragma omp parallel
   {
     int sid = get_socket_num();
@@ -520,6 +521,10 @@ int main(int argc, char** argv) {
     numa_bitmask_free(bm);
 
     for (int it = 0; it < NWARMUP + NITER; ++it) {
+      if (it == NWARMUP && tid == 0) {
+        wall_clock_time = dsecnd();
+      }
+
       // forward
       for (int l = 0; l < nlayers; ++l) {
         double t0 = dsecnd();
@@ -827,6 +832,7 @@ int main(int argc, char** argv) {
       } // for each layer
     } // for each iteration
   } // omp parallel
+  wall_clock_time = dsecnd() - wall_clock_time;
 
   /////////////////////////////////////////////////////////////////////////////
   // compute load imbalance
@@ -940,6 +946,7 @@ int main(int argc, char** argv) {
       total_times[WGT_UPDATE_ALLGATHER] / NITER * 1e3,
       total_flops[WGT_UPDATE_ALLGATHER] / total_times[WGT_UPDATE_ALLGATHER] /
           nsockets / 1e9);
+  printf("wall clock time %g ms/iter\n", wall_clock_time / NITER * 1e3);
 
   /////////////////////////////////////////////////////////////////////////////
   // print check sum for correctness check
