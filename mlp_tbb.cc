@@ -25,18 +25,13 @@
 #include "Matrix.h"
 #include "Partition.h"
 #include "Rand.h"
+#include "mlp_bench_common.h"
 
 // #define PRINT_PER_LAYER_PERFORMANCE
 // #define CORE_AFFINITY
 
 using namespace std;
 namespace flow = tbb::flow;
-
-constexpr int PAD = 16;
-constexpr int CACHE_LINE_LEN = 16;
-
-int nthreads_per_socket;
-int nthreads;
 
 class pinning_observer : public tbb::task_scheduler_observer {
  public:
@@ -103,29 +98,6 @@ Matrix<float, PAD>* create_matrix_with_numa_aware_allocation(
 
   return matrix;
 }
-
-enum Breakdown {
-  FWD = 0,
-  WGT_GRAD,
-  BWD,
-  NUM_BREAKDOWNS,
-};
-
-// Every other nfeatures should be divisible by 16 to make all-reduce work
-// for now.
-// To eliminate this constraint, we need pading after each socket's copy of
-// weight.
-int nfeatures[] = {1024, 1024, 1024, 1024, 1024, 1024, 1024, 1};
-// int nfeatures[] = { 512, 512 };
-constexpr int nlayers = sizeof(nfeatures) / sizeof(nfeatures[0]) - 1;
-constexpr int MAX_NUM_THREADS = 1024;
-constexpr int NWARMUP = 2, NITER = 256;
-
-// Being careful not to have false sharing
-constexpr int NUM_BREAKDOWNS_ROUNDED_UP =
-    (NUM_BREAKDOWNS + CACHE_LINE_LEN - 1) / CACHE_LINE_LEN * CACHE_LINE_LEN;
-double sum_times[MAX_NUM_THREADS][nlayers][NUM_BREAKDOWNS_ROUNDED_UP] = {0},
-       sum_flops[nlayers][NUM_BREAKDOWNS] = {0};
 
 class FullyConnectedForward {
  public:
@@ -467,9 +439,6 @@ int main(int argc, char** argv) {
 
   int batch_size = 1024 * nsockets; // weak-scaling with nsockets
 
-  unique_ptr<Matrix<float, PAD>> weights[nlayers], weight_grads[nlayers],
-      activations[nlayers + 2];
-
   /////////////////////////////////////////////////////////////////////////////
   // allocate memory and "first-touch" for NUMA-aware allocation
   for (int l = 0; l < nlayers; ++l) {
@@ -491,23 +460,7 @@ int main(int argc, char** argv) {
 
   /////////////////////////////////////////////////////////////////////////////
   // initialize values (only done by the master thread to be deterministic)
-
-  // initialize input
-  activations[0]->randFill(0.f, 1.f);
-
-  // initialize weights
-  for (int l = 0; l < nlayers; ++l) {
-    for (int i = 0; i < nfeatures[l + 1]; ++i) {
-      randFill(weights[l]->rawData(i, 0), weights[l]->ncols(), -0.1f, 0.1f);
-    }
-
-    for (int s = 1; s < nsockets; ++s) {
-      memcpy(
-          weights[l]->rawData(s * nfeatures[l + 1], 0),
-          weights[l]->rawData(),
-          nfeatures[l + 1] * weights[l]->ld() * sizeof(float));
-    }
-  }
+  init_matrices();
 
   /////////////////////////////////////////////////////////////////////////////
   // Main computation
@@ -584,7 +537,6 @@ int main(int argc, char** argv) {
     } // for each socket
   } // for each layer
 
-  double wall_clock_time = 0;
   for (int it = 0; it < NWARMUP + NITER; ++it) {
     if (it == NWARMUP) {
       wall_clock_time = dsecnd();
@@ -595,97 +547,12 @@ int main(int argc, char** argv) {
   wall_clock_time = dsecnd() - wall_clock_time;
 
   /////////////////////////////////////////////////////////////////////////////
-  // compute load imbalance
-  double load_imbalance[nlayers][NUM_BREAKDOWNS];
-  double max_sum_times[nlayers][NUM_BREAKDOWNS];
-
-  for (int l = 0; l < nlayers; ++l) {
-    for (int i = FWD; i < NUM_BREAKDOWNS; ++i) {
-      double sum = 0, max = 0;
-      if (i == WGT_GRAD || i == BWD) {
-        for (int sid = 0; sid < nsockets; ++sid) {
-          for (int tid_in_socket = 0; tid_in_socket < nthreads_per_socket;
-               ++tid_in_socket) {
-            int tid = sid * nthreads_per_socket + tid_in_socket;
-            sum += sum_times[tid][l][i];
-            max = std::max(max, sum_times[tid][l][i]);
-          }
-        }
-        max_sum_times[l][i] = max;
-
-        double avg = sum / nthreads_per_socket / nsockets;
-        load_imbalance[l][i] = max / avg;
-      } else {
-        // i >= WGT_UPDATE
-        // ? nthreads_per_socket_for_allreduce[nthreads_per_socket] * nsockets
-        // : nthreads;
-
-        for (int tid = 0; tid < nthreads; ++tid) {
-          sum += sum_times[tid][l][i];
-          max = std::max(max, sum_times[tid][l][i]);
-        }
-        max_sum_times[l][i] = max;
-
-        double avg = sum / nthreads;
-        load_imbalance[l][i] = max / avg;
-      }
-    }
-  } // for each layer
-
-  /////////////////////////////////////////////////////////////////////////////
   // report timing
-  double total_times[NUM_BREAKDOWNS] = {0}, total_flops[NUM_BREAKDOWNS] = {0};
-  for (int l = 0; l < nlayers; ++l) {
-    printf(
-        "[layer %d] fwd %g ms/iter (%g GF/s/core) imbalance %g, "
-        "wgt_grad %g ms/iter (%g GF/s/core) imbalance %g, "
-        "bwd %g ms/iter (%g GF/s/core) imbalance %g\n",
-        l,
-        max_sum_times[l][FWD] / NITER * 1e3,
-        sum_flops[l][FWD] / max_sum_times[l][FWD] / nthreads / 1e9,
-        load_imbalance[l][FWD],
-        max_sum_times[l][WGT_GRAD] / NITER * 1e3,
-        sum_flops[l][WGT_GRAD] / max_sum_times[l][WGT_GRAD] / nthreads / 1e9,
-        load_imbalance[l][WGT_GRAD],
-        max_sum_times[l][BWD] / NITER * 1e3,
-        sum_flops[l][BWD] / max_sum_times[l][BWD] / nthreads / 1e9,
-        load_imbalance[l][BWD]);
-
-    for (int i = FWD; i < NUM_BREAKDOWNS; ++i) {
-      total_times[i] += max_sum_times[l][i];
-      total_flops[i] += sum_flops[l][i];
-    }
-  } // for each layer
-
-  printf(
-      "total fwd %g ms/iter (%g GF/s/core), "
-      "wgt_grad %g ms/iter (%g GF/s/core), "
-      "bwd %g ms/iter (%g GF/s/core)\n",
-      total_times[FWD] / NITER * 1e3,
-      total_flops[FWD] / total_times[FWD] / nthreads / 1e9,
-      total_times[WGT_GRAD] / NITER * 1e3,
-      total_flops[WGT_GRAD] / total_times[WGT_GRAD] / nthreads / 1e9,
-      total_times[BWD] / NITER * 1e3,
-      total_flops[BWD] / total_times[BWD] / nthreads / 1e9);
-  printf("wall clock time %g ms/iter\n", wall_clock_time / NITER * 1e3);
+  report_timing();
 
   /////////////////////////////////////////////////////////////////////////////
   // print check sum for correctness check
-  for (int l = 0; l < nlayers; ++l) {
-    double l1_norm = 0, l2_norm = 0, trace = 0;
-    for (int i = 0; i < nfeatures[l + 1]; ++i) {
-      for (int j = 0; j < nfeatures[l]; ++j) {
-        float w = (*weights[l])(i, j);
-        l1_norm += std::abs(w);
-        l2_norm += w * w;
-      }
-      if (i < std::min(nfeatures[l + 1], nfeatures[l])) {
-        trace += (*weights[l])(i, i);
-      }
-    }
-    l2_norm = sqrt(l2_norm);
-    printf("layer %d l1 %g l2 %g trace %g\n", l, l1_norm, l2_norm, trace);
-  }
+  print_checksum();
 
   return 0;
 }
