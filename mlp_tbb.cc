@@ -27,6 +27,7 @@
 #include "Rand.h"
 
 // #define PRINT_PER_LAYER_PERFORMANCE
+// #define CORE_AFFINITY
 
 using namespace std;
 namespace flow = tbb::flow;
@@ -50,6 +51,7 @@ class pinning_observer : public tbb::task_scheduler_observer {
     numa_bitmask_setbit(bm, numa_node_id_);
     numa_bind(bm);
     numa_bitmask_free(bm);
+#ifdef CORE_AFFINITY
     if (numa_node_id_ != -1) {
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
@@ -66,6 +68,7 @@ class pinning_observer : public tbb::task_scheduler_observer {
       }
       pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     }
+#endif
   }
 
  private:
