@@ -9,7 +9,7 @@
 #include <mkl.h>
 #include <numa.h>
 #include <omp.h>
-#include <x86intrin.h>
+#include <immintrin.h>
 
 #include "Matrix.h"
 #include "Partition.h"

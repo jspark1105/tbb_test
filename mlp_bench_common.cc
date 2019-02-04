@@ -58,7 +58,7 @@ void report_timing() {
 
         for (int sid = 0; sid < nsockets; ++sid) {
           for (int tid_in_socket = 0;
-               tid_in_socket < nthreads_per_socket_for_gemm;
+               tid_in_socket < nthreads_per_socket;
                ++tid_in_socket) {
             int tid = sid * nthreads_per_socket + tid_in_socket;
             sum += sum_times[tid][l][i];
@@ -74,7 +74,7 @@ void report_timing() {
             ? nthreads_per_socket_for_allreduce[nthreads_per_socket] * nsockets
             : nthreads;
 
-        for (int tid = 0; tid < nthreads_for_i; ++tid) {
+        for (int tid = 0; tid < nthreads; ++tid) {
           sum += sum_times[tid][l][i];
           max = std::max(max, sum_times[tid][l][i]);
         }

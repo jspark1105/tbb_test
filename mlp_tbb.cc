@@ -10,7 +10,7 @@
 #include <mkl.h>
 #include <numa.h>
 #include <omp.h>
-#include <x86intrin.h>
+#include <immintrin.h>
 // #include <glog/logging.h>
 
 #include <tbb/flow_graph.h>
@@ -30,7 +30,10 @@
 // #define PRINT_PER_LAYER_PERFORMANCE
 // #define CORE_AFFINITY
 // #define NO_ALL_REDUCE
+
+// call numa bind again at the beginning of FCGradient
 #define SECOND_NUMA_BIND
+#define USE_LIGHTWEIGHT_IN_ALL_REDUCE
 
 using namespace std;
 namespace flow = tbb::flow;
@@ -217,7 +220,7 @@ class UpdateWeightReduceScatter {
   int task_id_; // task id within socket
   int idx_in_ring_; // my id in ring
   int next_sid_; // next socket in the ring to send data
-  mutable int iteration_;
+  mutable int iteration_{0};
 };
 
 class UpdateWeightAllGather {
@@ -351,7 +354,7 @@ class UpdateWeightAllGather {
   int task_id_; // task id within socket
   int idx_in_ring_; // my id in ring
   int next_sid_; // next socket in the ring to send data
-  mutable int iteration_;
+  mutable int iteration_{0};
 };
 
 // Create a thin async_node at each cross-graph edge.
@@ -375,7 +378,12 @@ std::unique_ptr<flow::graph_node> make_crossgraph_edge(
 }
 
 typedef flow::continue_node<flow::continue_msg> cn_type;
+#ifdef USE_LIGHTWEIGHT_IN_ALL_REDUCE
+typedef flow::continue_node<flow::continue_msg/*, flow::lightweight*/>
+    cn_all_reduce_type;
+#else
 typedef flow::continue_node<flow::continue_msg> cn_all_reduce_type;
+#endif
 
 /**
  * @params prev_nodes reduce scatter step 0 will have dependencies from these
@@ -391,6 +399,7 @@ void append_all_reduce_flow_graph(
     cn_type* exit,
     vector<flow::graph>& dags,
     vector<unique_ptr<flow::graph_node>>& cross_graph_edges,
+    vector<unique_ptr<cn_type>>& all_reduce_first_flow_nodes,
     vector<unique_ptr<cn_all_reduce_type>>& all_reduce_flow_nodes) {
   int ntasks_per_socket =
       nthreads_per_socket_for_allreduce[nthreads_per_socket];
@@ -402,39 +411,67 @@ void append_all_reduce_flow_graph(
         int idx_in_ring, prev_sid, next_sid;
         get_my_ring_info(sid, task, &idx_in_ring, &prev_sid, &next_sid);
 
-        all_reduce_flow_nodes.emplace_back(new cn_all_reduce_type(
-            dags[sid],
-            UpdateWeightReduceScatter(
-                weight_grad,
-                weight_grad_push_buf,
-                l,
-                step,
-                sid,
-                task,
-                idx_in_ring,
-                next_sid)));
         if (step == 0) {
+          all_reduce_first_flow_nodes.emplace_back(new cn_type(
+              dags[sid],
+              UpdateWeightReduceScatter(
+                  weight_grad,
+                  weight_grad_push_buf,
+                  l,
+                  step,
+                  sid,
+                  task,
+                  idx_in_ring,
+                  next_sid)));
           // Depedency from previous nodes
-          make_edge(*prev_nodes[sid], *all_reduce_flow_nodes.back());
+          make_edge(*prev_nodes[sid], *all_reduce_first_flow_nodes.back());
         } else {
-          // Depedency from previous step reduce scatter
-          // all_reduce_flow_nodes conceptually has 4 dimensions:
-          // [nlayers] x [nsteps = nsockets - 1] x [nsockets] x
-          // [ntasks_per_socket]
-          make_edge(
-              *all_reduce_flow_nodes
-                  [((l * 2 * (nsockets - 1) + step - 1) * nsockets + sid) *
-                       ntasks_per_socket +
-                   task],
-              *all_reduce_flow_nodes.back());
-          // Inter-socket dependency from previous step reduce scatter
-          cross_graph_edges.push_back(make_crossgraph_edge(
-              *all_reduce_flow_nodes
-                  [((l * 2 * (nsockets - 1) + step - 1) * nsockets + prev_sid) *
-                       ntasks_per_socket +
-                   task],
-              *all_reduce_flow_nodes.back(),
-              dags[sid]));
+          all_reduce_flow_nodes.emplace_back(new cn_all_reduce_type(
+              dags[sid],
+              UpdateWeightReduceScatter(
+                  weight_grad,
+                  weight_grad_push_buf,
+                  l,
+                  step,
+                  sid,
+                  task,
+                  idx_in_ring,
+                  next_sid)));
+
+          if (step == 1) {
+            // Depedency from previous step reduce scatter
+            make_edge(
+                *all_reduce_first_flow_nodes
+                    [(l * nsockets + sid) * ntasks_per_socket + task],
+                *all_reduce_flow_nodes.back());
+            // Inter-socket dependency from previous step reduce scatter
+            cross_graph_edges.push_back(make_crossgraph_edge(
+                *all_reduce_first_flow_nodes
+                    [(l * nsockets + sid) * ntasks_per_socket + task],
+                *all_reduce_flow_nodes.back(),
+                dags[sid]));
+          } else {
+            // Depedency from previous step reduce scatter
+            // all_reduce_flow_nodes conceptually has 4 dimensions:
+            // [nlayers] x [2 * nsteps - 1] x [nsockets] x
+            // [ntasks_per_socket]
+            make_edge(
+                *all_reduce_flow_nodes
+                    [((l * (2 * (nsockets - 1) - 1) + step - 2) * nsockets +
+                      sid) *
+                         ntasks_per_socket +
+                     task],
+                *all_reduce_flow_nodes.back());
+            // Inter-socket dependency from previous step reduce scatter
+            cross_graph_edges.push_back(make_crossgraph_edge(
+                *all_reduce_flow_nodes
+                    [((l * (2 * (nsockets - 1) - 1) + step - 2) * nsockets +
+                      prev_sid) *
+                         ntasks_per_socket +
+                     task],
+                *all_reduce_flow_nodes.back(),
+                dags[sid]));
+          }
         }
       } // for each task
     } // for each socket
@@ -460,25 +497,33 @@ void append_all_reduce_flow_graph(
                 task,
                 idx_in_ring,
                 next_sid)));
-        // Dependency from previous step
-        make_edge(
-            *all_reduce_flow_nodes
-                [((l * 2 * (nsockets - 1) + nsockets - 1 + step - 1) *
-                      nsockets +
-                  sid) *
-                     ntasks_per_socket +
-                 task],
-            *all_reduce_flow_nodes.back());
-        // Inter-socket dependency from previous step all gather
-        cross_graph_edges.push_back(make_crossgraph_edge(
-            *all_reduce_flow_nodes
-                [((l * 2 * (nsockets - 1) + nsockets - 1 + step - 1) *
-                      nsockets +
-                  prev_sid) *
-                     ntasks_per_socket +
-                 task],
-            *all_reduce_flow_nodes.back(),
-            dags[sid]));
+        if (nsockets == 2) {
+          // Dependency from previous step
+          make_edge(
+              *all_reduce_first_flow_nodes
+                  [(l * nsockets + sid) * ntasks_per_socket + task],
+              *all_reduce_flow_nodes.back());
+        } else {
+          // Dependency from previous step
+          make_edge(
+              *all_reduce_flow_nodes
+                  [((l * (2 * (nsockets - 1) - 1) + nsockets - 2 + step - 1) *
+                        nsockets +
+                    sid) *
+                       ntasks_per_socket +
+                   task],
+              *all_reduce_flow_nodes.back());
+          // Inter-socket dependency from previous step all gather
+          cross_graph_edges.push_back(make_crossgraph_edge(
+              *all_reduce_flow_nodes
+                  [((l * (2 * (nsockets - 1) - 1) + nsockets - 2 + step - 1) *
+                        nsockets +
+                    prev_sid) *
+                       ntasks_per_socket +
+                   task],
+              *all_reduce_flow_nodes.back(),
+              dags[sid]));
+        }
         if (step == nsockets - 2) {
           // Dependency to dag exit
           if (sid == 0) {
@@ -522,6 +567,7 @@ void check_all_reduce_correctness(
 
   vector<unique_ptr<flow::graph_node>> cross_graph_edges;
   vector<unique_ptr<cn_all_reduce_type>> all_reduce_flow_nodes;
+  vector<unique_ptr<cn_type>> all_reduce_first_flow_nodes;
   vector<unique_ptr<cn_type>> prev_nodes;
 
   for (int sid = 0; sid < nsockets; ++sid) {
@@ -544,6 +590,7 @@ void check_all_reduce_correctness(
       &dag_exit,
       dags,
       cross_graph_edges,
+      all_reduce_first_flow_nodes,
       all_reduce_flow_nodes);
 
   tbb_arena[0]->execute(
@@ -957,6 +1004,7 @@ int main(int argc, char** argv) {
 
   vector<unique_ptr<cn_type>> tbb_flow_nodes;
   vector<unique_ptr<cn_all_reduce_type>> tbb_all_reduce_flow_nodes;
+  vector<unique_ptr<cn_type>> tbb_all_reduce_first_flow_nodes;
   vector<unique_ptr<flow::graph_node>> cross_graph_edges;
   // forward
   for (int l = 0; l < nlayers; ++l) {
@@ -1027,6 +1075,7 @@ int main(int argc, char** argv) {
         &dag_exit,
         dags,
         cross_graph_edges,
+        tbb_all_reduce_first_flow_nodes,
         tbb_all_reduce_flow_nodes);
 #endif
   } // for each layer
