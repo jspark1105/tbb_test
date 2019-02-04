@@ -18,6 +18,7 @@
 template <typename T, int PAD = 0> class Matrix {
 public:
   ~Matrix() {
+    free(data_);
   }
 
   /// nrows x ncols matrix (uninitialized)
