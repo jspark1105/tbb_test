@@ -20,7 +20,7 @@
 //#define PRINT_PER_LAYER_PERFORMANCE
 //#define NO_ALL_REDUCE
 #define USE_RING_ALL_REDUCE
-//#define OVERLAP_ALL_REDUCE
+#define OVERLAP_ALL_REDUCE
 
 using namespace std;
 
