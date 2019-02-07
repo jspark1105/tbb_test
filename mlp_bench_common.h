@@ -35,7 +35,7 @@ constexpr int NUM_BREAKDOWNS_ROUNDED_UP =
 extern double sum_times[MAX_NUM_THREADS][nlayers][NUM_BREAKDOWNS_ROUNDED_UP],
     sum_flops[nlayers][NUM_BREAKDOWNS];
 extern double wall_clock_time;
-constexpr int NWARMUP = 2, NITER = 256;
+constexpr int NWARMUP = 16, NITER = 256;
 
 constexpr int nthreads_per_socket_for_allreduce[29] = {
     0, 0, 0, 0, 0,

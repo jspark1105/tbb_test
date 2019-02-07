@@ -1,10 +1,13 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <thread>
 
 #include <mkl.h>
@@ -30,6 +33,7 @@
 // #define PRINT_PER_LAYER_PERFORMANCE
 // #define CORE_AFFINITY
 // #define NO_ALL_REDUCE
+#define COLLECT_TRACE
 
 // call numa bind again at the beginning of FCGradient
 #define SECOND_NUMA_BIND
@@ -74,6 +78,34 @@ class pinning_observer : public tbb::task_scheduler_observer {
  private:
   int numa_node_id_;
 };
+
+#ifdef COLLECT_TRACE
+namespace {
+
+struct Trace {
+  long timestamp_us;
+  int pid, tid;
+  string name;
+  bool begin;
+
+  void serialize(ostream& ost) {
+    ost << "{\n";
+    ost << " \"ts\": " << timestamp_us << ",\n";
+    ost << " \"pid\": " << pid << ",\n";
+    ost << " \"tid\": " << tid << ",\n";
+    if (begin) {
+      ost << " \"name\": \"" << name << "\",\n";
+      ost << " \"ph\": \"B\"\n";
+    } else {
+      ost << " \"ph\": \"E\"\n";
+    }
+    ost << "}";
+  }
+};
+}
+
+vector<vector<Trace>> traces;
+#endif
 
 vector<unique_ptr<tbb::task_arena>> tbb_arena;
 vector<unique_ptr<pinning_observer>> tbb_observers;
@@ -127,6 +159,25 @@ class UpdateWeightReduceScatter {
         next_sid_(next_sid) {}
 
   void operator()() const {
+    int tid = numa_node_id_ * nthreads_per_socket +
+        tbb::task_arena::current_thread_index();
+
+#ifdef COLLECT_TRACE
+    long time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                          chrono::steady_clock::now())
+                          .time_since_epoch()
+                          .count();
+    if (iteration_ == NWARMUP - 1) {
+      traces[tid].emplace_back(Trace{time_stamp,
+                                     numa_node_id_,
+                                     tid - numa_node_id_ * nthreads_per_socket,
+                                     string("ReduceScatter") + "_" +
+                                         to_string(nlayers - 1 - layer_id_) +
+                                         "_" + to_string(task_id_),
+                                     true /* begin */});
+    }
+#endif
+
     int nrows = weight_grad_->nrows() / nsockets;
     int ncols = weight_grad_->ncols();
 
@@ -198,13 +249,28 @@ class UpdateWeightReduceScatter {
     if (iteration_ >= NWARMUP) {
       double dt = dsecnd() - t_reduce_scatter_begin;
       double bytes = (nsockets - 1) * nrows * ncols * sizeof(float);
-      int tid = numa_node_id_ * nthreads_per_socket +
-          tbb::task_arena::current_thread_index();
+
       sum_times[tid][layer_id_][WGT_UPDATE_REDUCE_SCATTER] += dt;
       if (task_id_ == 0 && sid == 0 && step_ == 0) {
         sum_flops[layer_id_][WGT_UPDATE_REDUCE_SCATTER] += bytes;
       }
     }
+
+#ifdef COLLECT_TRACE
+    time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                          chrono::steady_clock::now())
+                          .time_since_epoch()
+                          .count();
+    if (iteration_ == NWARMUP - 1) {
+      traces[tid].emplace_back(Trace{time_stamp,
+                                     numa_node_id_,
+                                     tid - numa_node_id_ * nthreads_per_socket,
+                                     string("ReduceScatter") + "_" +
+                                         to_string(nlayers - 1 - layer_id_) +
+                                         "_" + to_string(task_id_),
+                                     false /* end */});
+    }
+#endif
 
     ++iteration_;
   }
@@ -248,6 +314,25 @@ class UpdateWeightAllGather {
         next_sid_(next_sid) {}
 
   void operator()() const {
+    int tid = numa_node_id_ * nthreads_per_socket +
+        tbb::task_arena::current_thread_index();
+
+#ifdef COLLECT_TRACE
+    long time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                          chrono::steady_clock::now())
+                          .time_since_epoch()
+                          .count();
+    if (iteration_ == NWARMUP - 1) {
+      traces[tid].emplace_back(Trace{time_stamp,
+                                     numa_node_id_,
+                                     tid - numa_node_id_ * nthreads_per_socket,
+                                     string("AllGather") + "_" +
+                                         to_string(nlayers - 1 - layer_id_) +
+                                         "_" + to_string(task_id_),
+                                     true /* begin */});
+    }
+#endif
+
     int nrows = weight_grad_->nrows() / nsockets;
     int ncols = weight_grad_->ncols();
 
@@ -337,6 +422,22 @@ class UpdateWeightAllGather {
         sum_flops[layer_id_][WGT_UPDATE_ALLGATHER] += bytes;
       }
     }
+
+#ifdef COLLECT_TRACE
+    time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                          chrono::steady_clock::now())
+                          .time_since_epoch()
+                          .count();
+    if (iteration_ == NWARMUP - 1) {
+      traces[tid].emplace_back(Trace{time_stamp,
+                                     numa_node_id_,
+                                     tid - numa_node_id_ * nthreads_per_socket,
+                                     string("AllGather") + "_" +
+                                         to_string(nlayers - 1 - layer_id_) +
+                                         "_" + to_string(task_id_),
+                                     false /* end */});
+    }
+#endif
 
     ++iteration_;
   }
@@ -447,7 +548,7 @@ void append_all_reduce_flow_graph(
             // Inter-socket dependency from previous step reduce scatter
             cross_graph_edges.push_back(make_crossgraph_edge(
                 *all_reduce_first_flow_nodes
-                    [(l * nsockets + sid) * ntasks_per_socket + task],
+                    [(l * nsockets + prev_sid) * ntasks_per_socket + task],
                 *all_reduce_flow_nodes.back(),
                 dags[sid]));
           } else {
@@ -655,6 +756,25 @@ class FullyConnectedForward {
           numa_bitmask_free(bm);
 #endif
 
+          int tid = numa_node_id_ * nthreads_per_socket +
+              tbb::task_arena::current_thread_index();
+
+#ifdef COLLECT_TRACE
+          long time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                                chrono::steady_clock::now())
+                                .time_since_epoch()
+                                .count();
+          if (iteration_ == NWARMUP - 1) {
+            traces[tid].emplace_back(Trace{
+                time_stamp,
+                numa_node_id_,
+                tid - numa_node_id_ * nthreads_per_socket,
+                string("FC") + "_" + to_string(layer_id_) + "_" +
+                    to_string(task_id),
+                true /* begin */});
+          }
+#endif
+
           int m_begin, m_end, n_begin, n_end;
           get_2dpartition(
               &m_begin,
@@ -686,9 +806,6 @@ class FullyConnectedForward {
               output_->ld());
 
           if (iteration_ >= NWARMUP) {
-            int tid = numa_node_id_ * nthreads_per_socket +
-                tbb::task_arena::current_thread_index();
-
             double dt = dsecnd() - t0;
             double flops = 2. * m * n * k;
 #ifdef PRINT_PER_LAYER_PERFORMANCE
@@ -705,6 +822,22 @@ class FullyConnectedForward {
               sum_flops[layer_id_][FWD] += flops;
             }
           }
+
+#ifdef COLLECT_TRACE
+          time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                           chrono::steady_clock::now())
+                           .time_since_epoch()
+                           .count();
+          if (iteration_ == NWARMUP - 1) {
+            traces[tid].emplace_back(Trace{
+                time_stamp,
+                numa_node_id_,
+                tid - numa_node_id_ * nthreads_per_socket,
+                string("FC") + "_" + to_string(layer_id_) + "_" +
+                    to_string(task_id),
+                false /* end */});
+          }
+#endif
         },
         tbb::simple_partitioner());
 
@@ -767,6 +900,23 @@ class FullyConnectedBackward {
 
           int tid = numa_node_id_ * nthreads_per_socket +
               tbb::task_arena::current_thread_index();
+
+#ifdef COLLECT_TRACE
+          long time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                                chrono::steady_clock::now())
+                                .time_since_epoch()
+                                .count();
+          if (iteration_ == NWARMUP - 1) {
+            traces[tid].emplace_back(Trace{
+                time_stamp,
+                numa_node_id_,
+                tid - numa_node_id_ * nthreads_per_socket,
+                string("FCWgtGradient") + "_" + to_string(layer_id_) + "_" +
+                    to_string(task_id),
+                true /* begin */});
+          }
+#endif
+
           int m_begin, m_end, n_begin, n_end;
 
           // partition k over socket
@@ -843,6 +993,22 @@ class FullyConnectedBackward {
               sum_flops[layer_id_][WGT_GRAD] += flops;
             }
           }
+
+#ifdef COLLECT_TRACE
+          time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                                chrono::steady_clock::now())
+                                .time_since_epoch()
+                                .count();
+          if (iteration_ == NWARMUP - 1) {
+            traces[tid].emplace_back(Trace{
+                time_stamp,
+                numa_node_id_,
+                tid - numa_node_id_ * nthreads_per_socket,
+                string("FCWgtGradient") + "_" + to_string(layer_id_) + "_" +
+                    to_string(task_id),
+                false /* end */});
+          }
+#endif
         },
         tbb::simple_partitioner());
 
@@ -856,6 +1022,23 @@ class FullyConnectedBackward {
         [&](size_t task_id) {
           int tid = numa_node_id_ * nthreads_per_socket +
               tbb::task_arena::current_thread_index();
+
+#ifdef COLLECT_TRACE
+          long time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                                chrono::steady_clock::now())
+                                .time_since_epoch()
+                                .count();
+          if (iteration_ == NWARMUP - 1) {
+            traces[tid].emplace_back(Trace{
+                time_stamp,
+                numa_node_id_,
+                tid - numa_node_id_ * nthreads_per_socket,
+                string("FCBwdGradient") + "_" + to_string(layer_id_) + "_" +
+                    to_string(task_id),
+                true /* begin */});
+          }
+#endif
+
           int m_begin, m_end, n_begin, n_end;
           // backward gemm performs well with aspect ratio
           // (m_end - m_begin) ~= 32 * (n_end - n_begin)
@@ -925,6 +1108,22 @@ class FullyConnectedBackward {
               sum_flops[layer_id_][BWD] += flops;
             }
           }
+
+#ifdef COLLECT_TRACE
+          time_stamp = chrono::time_point_cast<chrono::microseconds>(
+                                chrono::steady_clock::now())
+                                .time_since_epoch()
+                                .count();
+          if (iteration_ == NWARMUP - 1) {
+            traces[tid].emplace_back(Trace{
+                time_stamp,
+                numa_node_id_,
+                tid - numa_node_id_ * nthreads_per_socket,
+                string("FCBwdGradient") + "_" + to_string(layer_id_) + "_" +
+                    to_string(task_id),
+                false /* end */});
+          }
+#endif
         },
         tbb::simple_partitioner());
 
@@ -953,6 +1152,9 @@ int main(int argc, char** argv) {
   nthreads = nsockets * nthreads_per_socket;
   omp_set_num_threads(1);
   mkl_set_num_threads(1);
+#ifdef COLLECT_TRACE
+  traces.resize(nthreads);
+#endif
 
   tbb::task_scheduler_init scheduler_init(nthreads);
   for (int s = 0; s < nsockets; ++s) {
@@ -1015,6 +1217,7 @@ int main(int argc, char** argv) {
   vector<unique_ptr<cn_all_reduce_type>> tbb_all_reduce_flow_nodes;
   vector<unique_ptr<cn_type>> tbb_all_reduce_first_flow_nodes;
   vector<unique_ptr<flow::graph_node>> cross_graph_edges;
+
   // forward
   for (int l = 0; l < nlayers; ++l) {
     for (int numa_node_id = 0; numa_node_id < nsockets; ++numa_node_id) {
@@ -1106,6 +1309,22 @@ int main(int argc, char** argv) {
   /////////////////////////////////////////////////////////////////////////////
   // print check sum for correctness check
   print_checksum();
+
+#ifdef COLLECT_TRACE
+  // dump trace
+  std::ofstream ofst("trace.log");
+  ofst << "[\n";
+  for (int tid = 0; tid < nthreads; ++tid) {
+    for (size_t i = 0; i < traces[tid].size(); ++i) {
+      traces[tid][i].serialize(ofst);
+      if (tid != nthreads - 1 || i != traces[tid].size() - 1) {
+        ofst << ",\n";
+      }
+    }
+  }
+  ofst << "\n]";
+  ofst.close();
+#endif
 
   return 0;
 }
