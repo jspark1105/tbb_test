@@ -647,6 +647,14 @@ class FullyConnectedForward {
         0,
         nthreads_per_socket,
         [&](size_t task_id) {
+#ifdef SECOND_NUMA_BIND
+          auto bm = numa_allocate_nodemask();
+          numa_bitmask_clearall(bm);
+          numa_bitmask_setbit(bm, numa_node_id_);
+          numa_bind(bm);
+          numa_bitmask_free(bm);
+#endif
+
           int m_begin, m_end, n_begin, n_end;
           get_2dpartition(
               &m_begin,
