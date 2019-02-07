@@ -944,6 +944,7 @@ int main(int argc, char** argv) {
   nthreads_per_socket = atoi(argv[2]);
   nthreads = nsockets * nthreads_per_socket;
   omp_set_num_threads(1);
+  mkl_set_num_threads(1);
 
   tbb::task_scheduler_init scheduler_init(nthreads);
   for (int s = 0; s < nsockets; ++s) {
