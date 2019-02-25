@@ -1,23 +1,27 @@
+# Pre-requisites
+# 1. Install Anaconda
+# wget https://repo.continuum.io/archive/Anaconda3-5.0.0-Linux-x86_64.sh -O anaconda3.sh
+# chmod +x anaconda3.sh
+# ./anaconda3.sh -b -p ~/local/anaconda3
+# ~/local/anaconda3/bin/conda create -yn pytorch
+# source ~/local/anaconda3/bin/activate pytorch
+# ~/local/anaconda3/bin/conda install pytorch-nightly -c pytorch
+# ~/local/anaconda3/bin/conda install graphviz pydot future
+# Then, you can do
+# python mlp_caffe2.py
+
 ### import packages ###
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 ### parse arguments ###
 import argparse
-import pdb
-
-import caffe2
-
-# matplot
-import matplotlib.pyplot as plt
 
 # numpy
 import numpy as np
 
 # caffe2
-from caffe2.python import brew, core, model_helper, net_drawer, workspace
-from IPython import display
-from matplotlib import pyplot as plt
-from numpy import linalg as la, random as ra
+from caffe2.python import brew, model_helper, net_drawer, workspace
+from numpy import random as ra
 
 
 parser = argparse.ArgumentParser(description="Train Multi-Level Perceptron MLP")
@@ -125,10 +129,8 @@ class Net:
             blobOut = ACTSTR.format(i) if i != (ln.size - 1) else "Y_pred"
             [w, b] = self.getLayerParams(dimIn, dimOut, i, args.random_weight_init)
             self.model.net.FC([blobIn, w, b], blobZ)
-            # if not explicitly initializing, this is better, but changes grad-descent code
-            # brew.fc(self.model, blobIn, blobZ, dimIn=n, dimOut=m)
 
-            brew.relu(self.model, blobZ, blobOut)
+            self.model.net.Relu(blobZ, blobOut)
             self.params.append(w)
             self.params.append(b)
 
@@ -148,7 +150,8 @@ class Net:
     def addTrainingOperators(self):
         # ONE is a constant value that is used in the gradient update. We only need to create it once, so it is explicitly placed in param_init_net.
         ONE = self.model.param_init_net.ConstantFill([], "ONE", shape=[1], value=1.0)
-        ITER = brew.iter(self.model, "iter")
+        workspace.FeedBlob("iter", np.ones(1).astype(np.float32))
+        ITER = self.model.net.Iter([], "iter")
         # LR = self.model.LearningRate(ITER, "LR", base_lr=args.learning_rate, policy="step", stepsize=1, gamma=0.999 )
         LR = self.model.LearningRate(
             ITER, "LR", base_lr=-1 * args.learning_rate, policy="fixed"
