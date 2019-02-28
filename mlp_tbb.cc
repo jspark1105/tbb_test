@@ -375,6 +375,7 @@ class UpdateWeightAllGather {
             _mm512_load_ps(weight_->rawData() + src_begin + i));
         _mm512_store_ps(weight_->rawData() + src_begin + i, temp_v);
       }
+      return;
     }
 
     int chunk_to_push = (idx_in_ring_ + 1 - step_ + nsockets) % nsockets;
@@ -588,7 +589,7 @@ void append_all_reduce_flow_graph(
   } // for each reduce scatter step
 
   // numa allgather
-  for (int step = 0; step < nsockets - 1; ++step) {
+  for (int step = 0; step < std::max(nsockets - 1, 1); ++step) {
     for (int sid = 0; sid < nsockets; ++sid) {
       for (int task = 0; task < ntasks_per_socket; ++task) {
         int idx_in_ring, prev_sid, next_sid;
@@ -608,7 +609,10 @@ void append_all_reduce_flow_graph(
                 idx_in_ring,
                 next_sid,
                 ntasks_per_socket)));
-        if (nsockets == 2) {
+        if (nsockets == 1) {
+          make_edge(*prev_nodes[sid], *all_reduce_flow_nodes[l].back());
+        }
+        else if (nsockets == 2) {
           // Dependency from previous step
           make_edge(
               *all_reduce_first_flow_nodes[l][sid * ntasks_per_socket + task],
@@ -631,7 +635,7 @@ void append_all_reduce_flow_graph(
               *all_reduce_flow_nodes[l].back(),
               dags[sid]));
         }
-        if (step == nsockets - 2) {
+        if (step == nsockets - 2 || nsockets == 1) {
           // Dependency to dag exit
           if (sid == 0) {
             make_edge(*all_reduce_flow_nodes[l].back(), *exit);
