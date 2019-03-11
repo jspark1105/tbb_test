@@ -204,9 +204,8 @@ class UpdateWeightReduceScatter {
     // we partition the array into nsockets chunks
     // at ith step, socket s reads (nsockets - 1 + s - i)th chunk from
     // socket s - 1 and accumulates to its local chunk
-    int chunk_to_push = (idx_in_ring_ - step_ + nsockets) % nsockets;
-    int chunk_to_read = (chunk_to_push + nsockets) % nsockets;
-    size_t chunk_begin = std::min(chunk_to_read * i_per_chunk, weight_size);
+    int chunk = (idx_in_ring_ - step_ + nsockets) % nsockets;
+    size_t chunk_begin = std::min(chunk * i_per_chunk, weight_size);
     size_t chunk_end = std::min(chunk_begin + i_per_chunk, weight_size);
 
     size_t task_begin =
@@ -226,12 +225,6 @@ class UpdateWeightReduceScatter {
                     weight_grad_push_buf_->rawData() + dst_begin + i)));
       }
     }
-
-    chunk_begin = std::min(chunk_to_push * i_per_chunk, weight_size);
-    chunk_end = std::min(chunk_begin + i_per_chunk, weight_size);
-
-    task_begin = std::min(chunk_begin + task_id_ * i_per_task, chunk_end);
-    task_end = std::min(task_begin + i_per_task, chunk_end);
 
     size_t src_begin = socket_begin + task_begin;
     dst_begin = next_socket_begin + task_begin;
@@ -564,10 +557,6 @@ class AllReduce {
                     next_sid,
                     ntasks_per_socket)));
             if (step == 1) {
-              // Dependency from previous step reduce scatter
-              make_edge(
-                  *all_reduce_first_flow_nodes_[sid * ntasks_per_socket + task],
-                  *all_reduce_flow_nodes_.back());
               // Inter-socket dependency from previous step reduce scatter
               cross_graph_edges.push_back(make_crossgraph_edge(
                   *all_reduce_first_flow_nodes_
@@ -575,16 +564,9 @@ class AllReduce {
                   *all_reduce_flow_nodes_.back(),
                   *dags_[sid]));
             } else {
-              // Depedency from previous step reduce scatter
-              // all_reduce_flow_nodes conceptually has 4 dimensions:
-              // [nlayers] x [2 * nsteps - 1] x [nsockets] x
-              // [ntasks_per_socket]
-              make_edge(
-                  *all_reduce_flow_nodes_
-                      [((step - 2) * nsockets + sid) * ntasks_per_socket +
-                       task],
-                  *all_reduce_flow_nodes_.back());
               // Inter-socket dependency from previous step reduce scatter
+              // all_reduce_flow_nodes conceptually has 4 dimensions:
+              // [nlayers] x [2 * nsteps - 1] x [nsockets] x [ntasks_per_socket]
               cross_graph_edges.push_back(make_crossgraph_edge(
                   *all_reduce_flow_nodes_
                       [((step - 2) * nsockets + prev_sid) * ntasks_per_socket +
@@ -632,12 +614,14 @@ class AllReduce {
                 *all_reduce_flow_nodes_.back());
           } else {
             // Dependency from previous step
-            make_edge(
-                *all_reduce_flow_nodes_
-                    [((nsockets - 2 + step - 1) * nsockets + sid) *
-                         ntasks_per_socket +
-                     task],
-                *all_reduce_flow_nodes_.back());
+            if (step == 0) {
+              make_edge(
+                  *all_reduce_flow_nodes_
+                      [((nsockets - 2 + step - 1) * nsockets + sid) *
+                           ntasks_per_socket +
+                       task],
+                  *all_reduce_flow_nodes_.back());
+            }
             // Inter-socket dependency from previous step all gather
             cross_graph_edges.push_back(make_crossgraph_edge(
                 *all_reduce_flow_nodes_
