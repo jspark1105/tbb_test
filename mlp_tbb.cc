@@ -701,7 +701,7 @@ void append_all_reduce_flow_graph(
   make_edge(*tbb_flow_nodes.back(), *dag_exit);
   for (int sid = 1; sid < nsockets; ++sid) {
     cross_graph_edges.push_back(make_crossgraph_edge(
-      *prev_nodes[sid], *tbb_flow_nodes.back(), dags[sid]));
+      *prev_nodes[sid], *tbb_flow_nodes.back(), dags[0]));
     cross_graph_edges.push_back(make_crossgraph_edge(
       *tbb_flow_nodes.back(), *dag_exit, dags[0]));
   }
